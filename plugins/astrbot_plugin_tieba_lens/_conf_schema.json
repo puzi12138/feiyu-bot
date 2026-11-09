@@ -1,0 +1,328 @@
+{
+  "enabled": {
+    "description": "启用贴吧拾光",
+    "type": "bool",
+    "default": true
+  },
+  "auto_parse": {
+    "description": "自动识别贴吧分享",
+    "type": "bool",
+    "default": true
+  },
+  "allow_private": {
+    "description": "允许私聊解析",
+    "type": "bool",
+    "default": true
+  },
+  "output_mode": {
+    "description": "消息发送形式",
+    "type": "string",
+    "default": "auto",
+    "hint": "auto：多页用合并转发；card：逐张图片；forward：聊天记录。合并转发主要用于 QQ OneBot。",
+    "options": [
+      "auto",
+      "card",
+      "forward"
+    ]
+  },
+  "forward_original_images": {
+    "description": "聊天记录附带正文原图",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，QQ 将渲染卡片与正文原图放进同一条聊天记录，先卡片后原图；关闭时只发送渲染卡片。原图不缩放、不转码。"
+  },
+  "theme": {
+    "description": "卡片主题",
+    "type": "string",
+    "default": "denia",
+    "hint": "paper 暖纸 · midnight 深夜 · mist 清雾 · denia 达妮娅 · miku 初音 · bilibili B站。",
+    "options": [
+      "paper",
+      "midnight",
+      "mist",
+      "denia",
+      "miku",
+      "bilibili"
+    ]
+  },
+  "font_override": {
+    "description": "字体覆盖",
+    "type": "string",
+    "default": "lxgw",
+    "hint": "默认使用霞鹜文楷；在 Web 面板上传字体后，可选择 custom 自定义字体。未上传时自动回退霞鹜文楷。",
+    "options": [
+      "lxgw",
+      "custom"
+    ]
+  },
+  "single_image": {
+    "description": "输出完整长图",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后直接完整渲染整张长图；仅超过实际渲染安全限额时另出续图，续图不重复页首。关闭时按分页逐张发送。"
+  },
+  "comment_limit": {
+    "description": "渲染评论楼层数",
+    "type": "int",
+    "default": 12,
+    "hint": "不包含首楼。0 表示只显示首楼；显示接口真实返回的评论，删除或不可见楼层不会补造。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "subcomment_limit": {
+    "description": "每层楼中楼条数",
+    "type": "int",
+    "default": 6,
+    "hint": "每个楼层显示的楼中楼数量；0 表示不显示。",
+    "slider": {
+      "min": 0,
+      "max": 20,
+      "step": 1
+    }
+  },
+  "forum_thread_limit": {
+    "description": "主页展示帖子数",
+    "type": "int",
+    "default": 10,
+    "slider": {
+      "min": 1,
+      "max": 30,
+      "step": 1
+    }
+  },
+  "sort": {
+    "description": "评论与列表排序",
+    "type": "string",
+    "default": "hot",
+    "hint": "hot 默认热门：首楼固定，回复按实际点赞数从高到低；同赞保留原楼层顺序，未知点赞排在已知值后。default 保留接口顺序 · latest 最新。吧首页列表由源站接口排序。",
+    "options": [
+      "default",
+      "hot",
+      "latest"
+    ]
+  },
+  "only_author": {
+    "description": "只看楼主",
+    "type": "bool",
+    "default": false
+  },
+  "include_images": {
+    "description": "显示正文图片",
+    "type": "bool",
+    "default": true
+  },
+  "include_emoji": {
+    "description": "显示贴吧表情",
+    "type": "bool",
+    "default": true
+  },
+  "image_limit": {
+    "description": "单次最多正文图片",
+    "type": "int",
+    "default": 40,
+    "hint": "达到上限的图片将显示占位说明。头像和表情另有总资源预算。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    }
+  },
+  "image_width": {
+    "description": "卡片宽度",
+    "type": "int",
+    "default": 960,
+    "slider": {
+      "min": 640,
+      "max": 1200,
+      "step": 1
+    }
+  },
+  "page_height": {
+    "description": "分页高度",
+    "type": "int",
+    "default": 3000,
+    "slider": {
+      "min": 1600,
+      "max": 5000,
+      "step": 1
+    }
+  },
+  "max_pages": {
+    "description": "最多卡片页数",
+    "type": "int",
+    "default": 12,
+    "hint": "超过限制会在卡片和任务中明确提示；完整已取回数据仍可导出 Markdown/JSON。",
+    "slider": {
+      "min": 1,
+      "max": 30,
+      "step": 1
+    }
+  },
+  "show_source": {
+    "description": "显示卡片来源链接、读取说明及收录/未展开数量提示（新解析生效）",
+    "type": "bool",
+    "default": true
+  },
+  "reactions": {
+    "description": "使用贴表情报告进度",
+    "type": "bool",
+    "default": true,
+    "hint": "仅保留开始、完成、失败三个状态，过程不切换表情。"
+  },
+  "reaction_start": {
+    "description": "开始处理表情 ID",
+    "type": "string",
+    "default": "289"
+  },
+  "reaction_done": {
+    "description": "完成表情 ID",
+    "type": "string",
+    "default": "124"
+  },
+  "reaction_failed": {
+    "description": "失败表情 ID",
+    "type": "string",
+    "default": "38"
+  },
+  "blacklist": {
+    "description": "群黑名单",
+    "type": "list",
+    "default": [],
+    "hint": "填 QQ 群号；自动解析和聊天解析指令均受黑名单约束。"
+  },
+  "group_overrides": {
+    "description": "分群配置",
+    "type": "dict",
+    "default": {},
+    "hint": "建议在「贴吧控制台 → 群聊规则」可视化编辑。黑名单始终优先。",
+    "items": {},
+    "editor_mode": true,
+    "editor_language": "json"
+  },
+  "dedup_seconds": {
+    "description": "相同链接去重秒数",
+    "type": "int",
+    "default": 120,
+    "slider": {
+      "min": 0,
+      "max": 3600,
+      "step": 1
+    }
+  },
+  "cooldown_seconds": {
+    "description": "会话解析间隔秒数",
+    "type": "int",
+    "default": 5,
+    "slider": {
+      "min": 0,
+      "max": 300,
+      "step": 1
+    }
+  },
+  "cache_minutes": {
+    "description": "帖子内容缓存分钟",
+    "type": "int",
+    "default": 30,
+    "hint": "0 表示不复用内容缓存；图片主题更改后会重新渲染。",
+    "slider": {
+      "min": 0,
+      "max": 1440,
+      "step": 1
+    }
+  },
+  "retention_hours": {
+    "description": "结果保留小时",
+    "type": "int",
+    "default": 24,
+    "hint": "每 10 分钟回收过期卡片和历史，默认保留 24 小时。",
+    "slider": {
+      "min": 1,
+      "max": 168,
+      "step": 1
+    }
+  },
+  "max_cache_mb": {
+    "description": "存储容量上限 MB",
+    "type": "int",
+    "default": 256,
+    "slider": {
+      "min": 32,
+      "max": 2048,
+      "step": 1
+    }
+  },
+  "request_timeout": {
+    "description": "单次请求超时秒数",
+    "type": "int",
+    "default": 20,
+    "slider": {
+      "min": 5,
+      "max": 60,
+      "step": 1
+    }
+  },
+  "request_delay": {
+    "description": "贴吧请求间隔秒数",
+    "type": "float",
+    "default": 1.0,
+    "slider": {
+      "min": 0.5,
+      "max": 10,
+      "step": 0.5
+    }
+  },
+  "retries": {
+    "description": "网络异常重试次数",
+    "type": "int",
+    "default": 1,
+    "slider": {
+      "min": 0,
+      "max": 3,
+      "step": 1
+    }
+  },
+  "max_concurrent": {
+    "description": "同时处理任务数",
+    "type": "int",
+    "default": 2,
+    "slider": {
+      "min": 1,
+      "max": 4,
+      "step": 1
+    }
+  },
+  "render_backend": {
+    "description": "卡片渲染方式",
+    "type": "string",
+    "default": "auto",
+    "options": ["auto", "service", "local"],
+    "hint": "auto 自动选择，优先复用已配置的 AstrBot 渲染服务和可用系统浏览器；service 复用 AstrBot 渲染服务；local 使用本地浏览器。可在贴吧控制台检测环境和准备浏览器。"
+  },
+  "browser_engine": {
+    "description": "本地浏览器类型",
+    "type": "string",
+    "default": "headless",
+    "options": ["headless", "chromium"],
+    "hint": "headless 为低占用推荐的精简 Chromium；chromium 为完整 Chromium。仅选择类型不会下载，需在贴吧控制台点击下载准备。"
+  },
+  "cookie": {
+    "description": "可选贴吧 Cookie",
+    "type": "string",
+    "default": "",
+    "hint": "公开内容通常无需登录。仅在有权限的情况下填写；自定义面板只写不回显。",
+    "secret": true
+  },
+  "max_links": {
+    "description": "一条消息最多解析链接",
+    "type": "int",
+    "default": 3,
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    }
+  }
+}

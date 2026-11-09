@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <!-- 允许移动端缩放，避免管理端在高 DPI / 小屏设备上不可读。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <title>主动消息管理端</title>
+
+    <!-- favicon 指向插件根目录的 logo，便于浏览器标签页识别。 -->
+    <link rel="icon" type="image/png" href="../logo.png">
+
+    <!-- 预加载字体样式，减少首屏闪烁。 -->
+    <link rel="preload" href="fonts/outfit.css" as="style">
+    <link href="fonts/outfit.css" rel="stylesheet">
+
+    <!-- 全局样式表，承载布局、卡片、主题变量等基础样式。 -->
+    <link rel="stylesheet" href="css/style.css">
+
+    <!-- 以 UMD 方式引入 React / Babel / MUI。
+         根据用户时区/语言自动选择 CDN：国内走 npmmirror，国外走 unpkg。 -->
+    <script>
+    (function() {
+        // 通过时区和语言判断是否为国内用户，安全降级到 unpkg。
+        var tz = '';
+        try {
+            if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+                tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+            }
+        } catch (e) {}
+        var lang = (navigator.language || '').toLowerCase();
+        var isCN = tz === 'Asia/Shanghai' || tz === 'Asia/Chongqing' || tz === 'Asia/Urumqi'
+                || lang === 'zh-cn';
+
+        var base = isCN ? 'https://registry.npmmirror.com' : 'https://unpkg.com';
+        var libs = isCN ? [
+            '/react/18.2.0/files/umd/react.production.min.js',
+            '/react-dom/18.2.0/files/umd/react-dom.production.min.js',
+            '/@babel/standalone/7.25.6/files/babel.min.js',
+            '/@mui/material/5.16.7/files/umd/material-ui.production.min.js',
+            '/@emotion/react/11.13.3/files/dist/emotion-react.umd.min.js',
+            '/@emotion/styled/11.13.0/files/dist/emotion-styled.umd.min.js',
+            '/marked/14.1.2/files/marked.min.js',
+            '/dompurify/3.1.6/files/dist/purify.min.js',
+            '/mermaid/11.4.1/files/dist/mermaid.min.js'
+        ] : [
+            '/react@18.2.0/umd/react.production.min.js',
+            '/react-dom@18.2.0/umd/react-dom.production.min.js',
+            '/@babel/standalone@7.25.6/babel.min.js',
+            '/@mui/material@5.16.7/umd/material-ui.production.min.js',
+            '/@emotion/react@11.13.3/dist/emotion-react.umd.min.js',
+            '/@emotion/styled@11.13.0/dist/emotion-styled.umd.min.js',
+            '/marked@14.1.2/marked.min.js',
+            '/dompurify@3.1.6/dist/purify.min.js',
+            '/mermaid@11.4.1/dist/mermaid.min.js'
+        ];
+
+        // 命名空间收拢，避免污染 window 全局变量并方便调试
+        window.ProactiveLoader = {
+            libsCount: libs.length,
+            libsLoaded: 0,
+            pendingScripts: [],
+            scriptRunning: false,
+            
+            // 弹出全局 UI 错误信息并停止加载
+            showError: function(msg) {
+                console.error("[ProactiveLoader] " + msg);
+                var text = document.getElementById('boot-text');
+                if (text) {
+                    text.textContent = msg;
+                    text.style.color = '#B3261E';
+                }
+            },
+
+            // 触发并调度脚本队列的执行状态机
+            triggerPendingScripts: function() {
+                if (this.libsLoaded < this.libsCount) {
+                    return;
+                }
+                
+                // 如果当前已有脚本正在执行加载/编译，则暂停触发，等待其加载/编译完毕回调
+                if (this.scriptRunning) {
+                    return;
+                }
+
+                if (this.pendingScripts.length > 0) {
+                    var task = this.pendingScripts.shift();
+                    this.scriptRunning = true;
+                    task();
+                }
+            },
+
+            // 向队列添加一个待执行的文件加载任务
+            queueScript: function(src, isBabel) {
+                var self = this;
+                this.pendingScripts.push(function() {
+                    if (isBabel) {
+                        fetch(src)
+                            .then(function(res) {
+                                if (!res.ok) {
+                                    throw new Error("HTTP error " + res.status);
+                                }
+                                return res.text();
+                            })
+                            .then(function(code) {
+                                if (typeof Babel === 'undefined') {
+                                    self.showError("Babel is not loaded, failed to compile: " + src);
+                                    return; // 终止加载，不恢复 scriptRunning，不触发后续队列
+                                }
+
+                                try {
+                                    var transformed = Babel.transform(code, {
+                                        presets: ['react']
+                                    }).code;
+
+                                    var s = document.createElement('script');
+                                    s.text = transformed;
+                                    document.body.appendChild(s);
+
+                                    // 执行成功，释放锁并调度下一个脚本
+                                    self.scriptRunning = false;
+                                    self.triggerPendingScripts();
+                                } catch (e) {
+                                    self.showError("Failed to compile JSX file " + src + ": " + e.message);
+                                }
+                            })
+                            .catch(function(err) {
+                                self.showError("Failed to fetch JSX script " + src + ": " + err.message);
+                            });
+                    } else {
+                        var s = document.createElement('script');
+                        s.src = src;
+                        s.onload = function() {
+                            self.scriptRunning = false;
+                            self.triggerPendingScripts();
+                        };
+                        s.onerror = function() {
+                            self.showError("Failed to load script: " + src);
+                        };
+                        document.body.appendChild(s);
+                    }
+                });
+                this.triggerPendingScripts();
+            },
+
+            // 向队列添加一个内联闭包函数任务
+            queueTask: function(taskFn) {
+                var self = this;
+                this.pendingScripts.push(function() {
+                    try {
+                        taskFn();
+                        self.scriptRunning = false;
+                        self.triggerPendingScripts();
+                    } catch (e) {
+                        self.showError("Inline task failed: " + e.message);
+                    }
+                });
+                this.triggerPendingScripts();
+            }
+        };
+
+        // 通过 DOM API 创建 script 元素，兼容 CSP 且比 document.write 更可靠。
+        var head = document.head || document.getElementsByTagName('head')[0];
+        for (var i = 0; i < libs.length; i++) {
+            var s = document.createElement('script');
+            s.src = base + libs[i];
+            s.async = false; // 强迫动态脚本按数组中的逻辑顺序同步下载并执行
+            if (i < 2) s.crossOrigin = 'anonymous';
+            s.onload = s.onerror = function() {
+                window.ProactiveLoader.libsLoaded++;
+                window.ProactiveLoader.triggerPendingScripts();
+            };
+            head.appendChild(s);
+        }
+    })();
+    </script>
+</head>
+
+<body>
+    <!-- 启动画面：在 React 应用加载前先提供一个可见的骨架屏，避免白屏。 -->
+    <div id="loading-skeleton" class="boot-loader">
+        <div class="boot-loader__logo">
+            <img src="../logo.png" alt="logo">
+        </div>
+        <div class="boot-loader__title">主动消息管理端</div>
+        <div class="boot-loader__subtitle" id="boot-text">正在初始化...</div>
+        <div id="boot-login" class="boot-login">
+            <label for="boot-password" class="boot-login__label">管理端密码</label>
+            <input id="boot-password" class="boot-login__input" type="password" autocomplete="current-password" placeholder="请输入访问密码">
+            <button id="boot-login-button" class="boot-login__button" type="button">
+                登录进入
+            </button>
+        </div>
+        <div class="boot-loader__progress">
+            <div class="boot-loader__progress-bar"></div>
+        </div>
+    </div>
+
+    <!-- React 根节点；所有前端界面最终都会挂到这里。 -->
+    <div id="root"></div>
+
+    <!-- 工具脚本必须先于 JSX 模块加载，以便后者可直接使用 window 上的工具对象。 -->
+    <script>
+        window.ProactiveLoader.queueScript("js/utils/auth.js", false);
+        window.ProactiveLoader.queueScript("js/utils/http.js", false);
+        window.ProactiveLoader.queueScript("js/utils/formatters.js", false);
+        window.ProactiveLoader.queueScript("js/utils/markdown.js", false);
+    </script>
+
+    <script>
+        // 鉴权探测流程脚本，必须在 window.AuthUtil 声明后运行。
+        window.ProactiveLoader.queueTask(function() {
+            (function () {
+                // 该标记用于阻止 React 应用过早启动，直到鉴权探测流程结束后再解除。
+                window.__PROACTIVE_AUTH_PENDING = true;
+
+                var bootLoginEventsBound = false;
+
+                function proceed() {
+                    // 告知其余脚本：鉴权检查已完成，可以开始渲染业务界面。
+                    window.__PROACTIVE_AUTH_PENDING = false;
+                    window.dispatchEvent(new Event('auth-ready'));
+
+                    // 延迟关闭骨架屏，让首屏过渡更柔和，避免闪烁。
+                    setTimeout(function() {
+                        var skeleton = document.getElementById('loading-skeleton');
+                        if (skeleton) {
+                            skeleton.classList.add('is-exiting');
+                            setTimeout(function() {
+                                if (skeleton.parentNode) skeleton.parentNode.removeChild(skeleton);
+                            }, 300);
+                        }
+                    }, 500);
+                }
+
+                function showError(msg) {
+                    window.ProactiveLoader.showError(msg);
+                }
+
+                function showInfo(msg) {
+                    const text = document.getElementById('boot-text');
+                    if (text) {
+                        text.textContent = msg;
+                        text.style.color = '#D05F00';
+                    }
+                }
+
+                function setLoginBusy(busy) {
+                    var button = document.getElementById('boot-login-button');
+                    var input = document.getElementById('boot-password');
+                    if (button) {
+                        button.disabled = !!busy;
+                        button.style.opacity = busy ? '0.72' : '1';
+                        button.textContent = busy ? '登录中...' : '登录进入';
+                    }
+                    if (input) {
+                        input.disabled = !!busy;
+                    }
+                }
+
+                function showLoginForm(message) {
+                    var login = document.getElementById('boot-login');
+                    var input = document.getElementById('boot-password');
+                    var button = document.getElementById('boot-login-button');
+                    if (login) login.style.display = 'block';
+                    if (message) showError(message);
+                    setLoginBusy(false);
+
+                    if (!button || !input) {
+                        if (input) setTimeout(function () { input.focus(); }, 0);
+                        return;
+                    }
+
+                    function submitLogin() {
+                        var password = input.value || '';
+                        if (!password.trim()) {
+                            showError('请输入管理端密码');
+                            input.focus();
+                            return;
+                        }
+
+                        setLoginBusy(true);
+                        showInfo('正在验证密码...');
+                        fetch('/api/login', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ password: password }),
+                        })
+                            .then(function (res) {
+                                return res.json()
+                                    .then(function (data) {
+                                        return { ok: res.ok, data: data };
+                                    })
+                                    .catch(function () {
+                                        return { ok: res.ok, data: null };
+                                    });
+                            })
+                            .then(function (result) {
+                                if (!result.ok) {
+                                    var errorMessage = result.data && result.data.error ? result.data.error : '登录失败';
+                                    throw new Error(errorMessage);
+                                }
+                                var token = result.data && result.data.token;
+                                if (!token) {
+                                    throw new Error('登录成功但未获取到访问令牌');
+                                }
+                                window.AuthUtil.setToken(token);
+                                proceed();
+                            })
+                            .catch(function (err) {
+                                showError(err && err.message ? err.message : '登录失败，请稍后重试');
+                                setLoginBusy(false);
+                                input.focus();
+                                input.select();
+                            });
+                    }
+
+                    if (!bootLoginEventsBound) {
+                        button.addEventListener('click', submitLogin);
+                        input.addEventListener('keydown', function (event) {
+                            if (event.key === 'Enter') {
+                                event.preventDefault();
+                                submitLogin();
+                            }
+                        });
+                        bootLoginEventsBound = true;
+                    }
+                    setTimeout(function () { input.focus(); }, 0);
+                }
+
+                function verifyExistingToken(token) {
+                    // 通过访问受保护接口来验证 token 是否仍然有效。
+                    return fetch('/api/status', {
+                        headers: {
+                            'Authorization': 'Bearer ' + token,
+                        },
+                    }).then(function (res) {
+                        if (res.status === 401) {
+                            // 若 token 失效，则清理本地缓存，避免前端继续携带错误凭证。
+                            window.AuthUtil.clearToken();
+                            showLoginForm('访问令牌已失效，请重新登录');
+                            return;
+                        }
+                        if (!res.ok) {
+                            throw new Error('管理端鉴权校验失败，请稍后重试');
+                        }
+                        proceed();
+                    });
+                }
+
+                // 第一步：询问后端当前是否启用了管理端密码。
+                fetch('/api/auth-info')
+                    .then(function (res) { return res.json(); })
+                    .then(function (data) {
+                        if (!data.auth_required) {
+                            // 无需鉴权时立即放行，进入应用初始化。
+                            proceed();
+                            return;
+                        }
+
+                        // 已启用鉴权时，从 localStorage 中取出历史 token 进行有效性验证。
+                        var token = window.AuthUtil.getToken();
+                        if (!token) {
+                            showLoginForm('请输入管理端密码以继续访问');
+                            return;
+                        }
+
+                        return verifyExistingToken(token);
+                    })
+                    .catch(function () {
+                        // 管理端不可达通常意味着后端服务未启动或网络异常。
+                        showError('管理端连接失败，请检查插件状态');
+                    });
+            })();
+        });
+    </script>
+
+    <!-- 以下 JSX 文件按“基础能力 -> 布局组件 -> 页面视图 -> 应用入口”的顺序加载。
+         注意：源码仓库依赖运行时 Babel 编译，因此这里保持 .jsx 路径且第二个参数为 true；
+         Release 打包会统一把这些引用改写为预编译后的 .js，并将 isBabel 标志置为 false，
+         请勿在源码中手动改写，以免破坏开发态的动态编译。 -->
+    <script>
+        window.ProactiveLoader.queueScript("js/context/AppContext.jsx", true);
+        window.ProactiveLoader.queueScript("js/hooks/useApi.js", true);
+        window.ProactiveLoader.queueScript("js/hooks/useWebSocket.js", true);
+        window.ProactiveLoader.queueScript("js/components/layout/Sidebar.jsx", true);
+        window.ProactiveLoader.queueScript("js/components/layout/Header.jsx", true);
+        window.ProactiveLoader.queueScript("js/views/StatusView.jsx", true);
+        window.ProactiveLoader.queueScript("js/components/config/ConfigRenderer.jsx", true);
+        window.ProactiveLoader.queueScript("js/views/ConfigView.jsx", true);
+        window.ProactiveLoader.queueScript("js/views/TasksView.jsx", true);
+        window.ProactiveLoader.queueScript("js/views/NotificationsView.jsx", true);
+        window.ProactiveLoader.queueScript("js/views/MarkdownDocsView.jsx", true);
+        window.ProactiveLoader.queueScript("js/app.jsx", true);
+    </script>
+</body>
+
+</html>

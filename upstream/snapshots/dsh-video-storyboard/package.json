@@ -1,0 +1,92 @@
+{
+  "name": "dsh-video-storyboard",
+  "version": "0.5.12",
+  "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "video",
+    "storyboard",
+    "contact-sheet",
+    "ffmpeg",
+    "multimodal",
+    "asr"
+  ],
+  "homepage": "https://github.com/SAOS-3624/dsh-video-storyboard#readme",
+  "bugs": {
+    "url": "https://github.com/SAOS-3624/dsh-video-storyboard/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SAOS-3624/dsh-video-storyboard.git"
+  },
+  "author": "SAOS-3624",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./plan": "./src/storyboard/plan.js",
+    "./scan": "./src/storyboard/scan.js",
+    "./segments": "./src/storyboard/segments.js",
+    "./probe": "./src/storyboard/probe.js",
+    "./sheet": "./src/storyboard/sheet.js",
+    "./frames": "./src/storyboard/frames.js",
+    "./format": "./src/storyboard/format.js",
+    "./pipeline": "./src/storyboard/pipeline.js",
+    "./tool-spec": "./src/tool-spec.js",
+    "./storyboard": "./src/storyboard/index.js",
+    "./board": "./src/storyboard/board.js",
+    "./cache": "./src/storyboard/cache.js",
+    "./storage": "./src/storyboard/storage.js",
+    "./locate": "./src/storyboard/locate.js",
+    "./subtitles": "./src/storyboard/subtitles.js",
+    "./ytdlp": "./src/storyboard/ytdlp.js",
+    "./python": "./src/storyboard/python.js",
+    "./browser-time": "./src/storyboard/browser-time.js",
+    "./transcript-pass": "./src/storyboard/transcript-pass.js"
+  },
+  "bin": {
+    "dsh-video-scan": "./bin/scan-video.mjs",
+    "dsh-video-storyboard": "./bin/storyboard.mjs",
+    "dsh-video-doctor": "./bin/doctor.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "scripts",
+    "docs",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "README.zh.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "CREDITS.md",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "npm test",
+    "check": "node scripts/check-syntax.mjs",
+    "doctor": "node bin/doctor.mjs",
+    "asrcheck": "node bin/asr-check.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

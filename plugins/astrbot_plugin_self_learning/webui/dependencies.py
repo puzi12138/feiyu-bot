@@ -1,0 +1,277 @@
+"""
+依赖注入容器 - 管理全局服务实例
+"""
+from typing import Optional, Any, List, Dict
+from astrbot.api import logger
+
+
+class ServiceContainer:
+    """服务容器 - 单例模式"""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        # 插件配置
+        self.plugin_config: Optional[Any] = None
+        self.astrbot_config: Optional[Any] = None
+        self.plugin_instance: Optional[Any] = None
+
+        # 核心服务
+        self.persona_manager: Optional[Any] = None
+        self.persona_backup_manager: Optional[Any] = None
+        self.persona_updater: Optional[Any] = None
+        self.database_manager: Optional[Any] = None
+        self.database_degraded: bool = False
+        self.database_start_error: Optional[str] = None
+        self.llm_adapter: Optional[Any] = None
+        self.progressive_learning: Optional[Any] = None
+        self.v2_integration: Optional[Any] = None
+        self.factory_manager: Optional[Any] = None
+        self.component_factory: Optional[Any] = None
+
+        # AstrBot 框架服务
+        self.astrbot_persona_manager: Optional[Any] = None
+
+        # PersonaWebManager 实例
+        self.persona_web_manager: Optional[Any] = None
+
+        # WebUI 配置
+        self.webui_config: Optional[Any] = None
+        self.feature_delegation: Optional[Any] = None
+        self.v2_integration: Optional[Any] = None
+
+        # 密码配置
+        self.password_config: Dict[str, Any] = {}
+
+        # 待审核更新
+        self.pending_updates: List[Any] = []
+
+        # group_id到unified_msg_origin映射表（多配置文件支持）
+        self.group_id_to_unified_origin: Dict[str, str] = {}
+
+        # 智能指标服务
+        self.intelligence_metrics_service: Optional[Any] = None
+
+        # 性能计时收集器（指向插件实例的 get_perf_data 方法）
+        self.perf_collector: Optional[Any] = None
+
+        # 性能监测模块
+        self.metric_collector: Optional[Any] = None
+        self.health_checker: Optional[Any] = None
+
+        self._initialized = True
+
+    def initialize(
+        self,
+        plugin_config,
+        factory_manager,
+        llm_client=None,
+        astrbot_persona_manager=None,
+        group_id_to_unified_origin=None,
+        feature_delegation=None,
+        astrbot_config=None,
+        plugin_instance=None,
+        database_manager=None,
+        database_degraded=False,
+        database_start_error=None,
+        v2_integration=None,
+    ):
+        """
+        初始化服务容器
+
+        Args:
+            plugin_config: 插件配置
+            factory_manager: 工厂管理器
+            llm_client: LLM 客户端（废弃，保留兼容性）
+            astrbot_persona_manager: AstrBot 人格管理器
+            group_id_to_unified_origin: group_id到unified_msg_origin映射表
+            database_manager: 已由插件生命周期启动的数据库管理器
+            database_degraded: 数据库启动失败时的受限模式标记
+            database_start_error: 数据库启动失败原因
+        """
+        self.plugin_config = plugin_config
+        self.astrbot_config = astrbot_config
+        self.plugin_instance = plugin_instance
+        self.factory_manager = factory_manager
+        try:
+            self.component_factory = factory_manager.get_component_factory()
+        except AttributeError:
+            self.component_factory = None
+        except Exception as e:
+            logger.warning(f"获取 component_factory 失败: {e}")
+            self.component_factory = None
+        self.feature_delegation = feature_delegation
+        self.v2_integration = v2_integration
+        self.astrbot_persona_manager = astrbot_persona_manager
+        self.database_degraded = database_degraded
+        self.database_start_error = database_start_error
+        if group_id_to_unified_origin is not None:
+            self.group_id_to_unified_origin = group_id_to_unified_origin
+
+        # 从工厂获取服务
+        service_factory = factory_manager.get_service_factory()
+        self.persona_manager = service_factory.create_persona_manager()
+        try:
+            self.persona_backup_manager = service_factory.create_persona_backup_manager()
+        except Exception as e:
+            logger.warning(f"获取 persona_backup_manager 失败: {e}")
+            self.persona_backup_manager = None
+        self.database_manager = (
+            database_manager
+            if database_manager is not None
+            else service_factory.create_database_manager()
+        )
+        self.llm_adapter = service_factory.create_framework_llm_adapter()
+        self.progressive_learning = service_factory.create_progressive_learning()
+
+        # 获取人格更新器
+        try:
+            self.persona_updater = service_factory.get_persona_updater()
+            logger.info(f" [WebUI] persona_updater 获取成功: {type(self.persona_updater)}")
+        except Exception as e:
+            logger.warning(f"获取 persona_updater 失败: {e}")
+            self.persona_updater = None
+
+        # 创建 WebUI 配置
+        from .config import WebUIConfig
+        self.webui_config = WebUIConfig.from_plugin_config(plugin_config)
+
+        # 初始化智能指标服务
+        try:
+            from ..services.analysis import IntelligenceMetricsService
+            self.intelligence_metrics_service = IntelligenceMetricsService(
+                plugin_config,
+                self.database_manager,
+                llm_adapter=self.llm_adapter
+            )
+        except Exception as e:
+            logger.warning(f"初始化智能指标服务失败: {e}")
+
+        # 初始化性能监测模块
+        try:
+            from ..services.monitoring import MetricCollector, HealthChecker
+            from ..utils.cache_manager import get_cache_manager
+
+            service_registry = service_factory.get_service_registry()
+            cache_manager = get_cache_manager()
+
+            self.metric_collector = MetricCollector(
+                perf_tracker=self.perf_collector,
+                cache_manager=cache_manager,
+                llm_adapter=self.llm_adapter,
+                service_registry=service_registry,
+                progressive_learning=self.progressive_learning,
+            )
+            self.health_checker = HealthChecker(
+                service_registry=service_registry,
+                cache_manager=cache_manager,
+                llm_adapter=self.llm_adapter,
+            )
+            logger.info("[WebUI] 性能监测模块初始化成功")
+        except Exception as e:
+            logger.warning(f"初始化性能监测模块失败: {e}")
+
+        # 初始化 PersonaWebManager
+        if astrbot_persona_manager:
+            try:
+                from ..persona_web_manager import PersonaWebManager
+                import asyncio
+                self.persona_web_manager = PersonaWebManager(astrbot_persona_manager)
+                # 捕获主事件循环（当前在 set_plugin_services 异步上下文中）
+                try:
+                    self.persona_web_manager._main_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    self.persona_web_manager._main_loop = asyncio.get_event_loop()
+                # 传递 group_id_to_unified_origin 映射引用（多配置文件支持）
+                self.persona_web_manager.group_id_to_unified_origin = self.group_id_to_unified_origin
+                logger.info(" [WebUI] PersonaWebManager 初始化成功")
+            except Exception as e:
+                logger.warning(f"初始化 PersonaWebManager 失败: {e}")
+                self.persona_web_manager = None
+        else:
+            logger.warning("astrbot_persona_manager 未提供，无法初始化 PersonaWebManager")
+            self.persona_web_manager = None
+
+        logger.info(" [WebUI] 服务容器初始化完成")
+
+    def get_plugin_config(self):
+        """获取插件配置"""
+        return self.plugin_config
+
+    def get_database_manager(self):
+        """获取数据库管理器"""
+        return self.database_manager
+
+    def get_llm_adapter(self):
+        """获取 LLM 适配器"""
+        return self.llm_adapter
+
+    def get_persona_manager(self):
+        """获取人格管理器"""
+        return self.persona_manager
+
+
+# 全局容器实例
+_container = ServiceContainer()
+
+
+def get_container() -> ServiceContainer:
+    """获取全局服务容器"""
+    return _container
+
+
+# 兼容原有的 set_plugin_services 接口
+
+async def set_plugin_services(
+    plugin_config,
+    factory_manager,
+    llm_client,
+    astrbot_persona_manager,
+    group_id_to_unified_origin=None,
+    feature_delegation=None,
+    astrbot_config=None,
+    plugin_instance=None,
+    database_manager=None,
+    database_degraded=False,
+    database_start_error=None,
+    v2_integration=None,
+):
+    """
+    设置插件服务（兼容原有接口）
+
+    Args:
+        plugin_config: 插件配置
+        factory_manager: 工厂管理器
+        llm_client: LLM 客户端（废弃）
+        astrbot_persona_manager: AstrBot 人格管理器
+        group_id_to_unified_origin: group_id到unified_msg_origin映射表
+        database_manager: 已由插件生命周期启动的数据库管理器
+        database_degraded: 数据库启动失败时的受限模式标记
+        database_start_error: 数据库启动失败原因
+        v2_integration: 已创建的 V2 学习集成实例
+    """
+    _container.initialize(
+        plugin_config=plugin_config,
+        factory_manager=factory_manager,
+        llm_client=llm_client,
+        astrbot_persona_manager=astrbot_persona_manager,
+        group_id_to_unified_origin=group_id_to_unified_origin,
+        feature_delegation=feature_delegation,
+        astrbot_config=astrbot_config,
+        plugin_instance=plugin_instance,
+        database_manager=database_manager,
+        database_degraded=database_degraded,
+        database_start_error=database_start_error,
+        v2_integration=v2_integration,
+    )
+
+    logger.info(" [WebUI] 插件服务设置完成")

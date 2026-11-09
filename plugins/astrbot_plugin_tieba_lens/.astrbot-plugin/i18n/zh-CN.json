@@ -1,0 +1,12 @@
+{
+  "metadata": {
+    "display_name": "贴吧拾光",
+    "short_desc": "图文帖子、主页与评论，原生贴吧风格卡片。"
+  },
+  "pages": {
+    "console": {
+      "title": "贴吧控制台",
+      "description": "解析预览、卡片外观、评论范围、群聊规则与任务管理。"
+    }
+  }
+}

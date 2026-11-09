@@ -1,0 +1,25 @@
+{
+  "template_only_not_runtime_config": true,
+  "installation_root": "",
+  "identity": {
+    "owner_qq_id": "",
+    "bot_qq_id": "",
+    "allowed_friend_ids": [],
+    "allowed_group_ids": []
+  },
+  "model_provider": {
+    "base_url": "",
+    "model": "",
+    "api_key": ""
+  },
+  "outbound_features": {
+    "qq_proactive_messages": false,
+    "heybox_comments": false,
+    "bilibili_shares": false,
+    "qzone_sync": false,
+    "scheduled_comic_publication": false
+  },
+  "authorization_state": "not_configured",
+  "private_persona": "configure_locally",
+  "native_bridge_integrity_manifest": "must_be_reviewed_and_regenerated_locally"
+}

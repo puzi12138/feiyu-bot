@@ -1,0 +1,1278 @@
+from __future__ import annotations
+
+import asyncio
+import time
+import weakref
+from collections import OrderedDict
+from contextlib import suppress
+from pathlib import Path
+from typing import Any
+
+from . import __version__, feiyu_recovery, feiyu_unseen_feed
+from .api_client import (
+    CredentialInvalidError,
+    RequestNotAuthorized,
+    SendUncertainError,
+    XiaoheiheApiClient,
+    XiaoheiheApiError,
+)
+from .auth import AuthService, CredentialStore
+from .config_service import ConfigService
+from .database import Database
+from .feed_service import FeedService
+from .feiyu_auto_reply_gate import authorize, block_event, initialize_history, mark_not_sent
+from .logging_service import LoggingService
+from .models import EventState, RoutingTarget
+from .repository import Repository
+from .request_signing import ensure_client_identity
+from .security import redact_log_text, redact_text, sanitize_reply_text
+from .task_manager import TaskManager
+
+PLUGIN_NAME = "astrbot_plugin_xiaoheihe_adapter"
+
+AUX_PROVIDER_PURPOSE_LABELS = {
+    "context": "楼层上下文压缩",
+    "image": "图片转述",
+}
+
+_runtime: RuntimeServices | None = None
+
+
+def bind_runtime(runtime: RuntimeServices) -> None:
+    global _runtime
+    _runtime = runtime
+
+
+def get_runtime() -> RuntimeServices:
+    if _runtime is None:
+        raise RuntimeError("小黑盒插件运行时尚未绑定")
+    return _runtime
+
+
+def unbind_runtime(runtime: RuntimeServices) -> None:
+    global _runtime
+    if _runtime is runtime:
+        _runtime = None
+
+
+class RuntimeServices:
+    def __init__(self, config: Any, data_dir: Path) -> None:
+        self.data_dir = data_dir.resolve()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.config = ConfigService(config)
+        self.tasks = TaskManager()
+        self.database = Database(self.data_dir / "xiaoheihe.db")
+        self.repository = Repository(self.database)
+        log_config = self.config.snapshot()["logging"]
+        retention = self.config.snapshot()["retention"]
+        self.logging = LoggingService(
+            self.data_dir,
+            self.tasks,
+            level=str(log_config["level"]),
+            max_memory_entries=int(log_config["max_memory_entries"]),
+            total_limit_mb=int(retention["log_total_limit_mb"]),
+        )
+        self.credentials = CredentialStore(self.data_dir)
+        self.auth = AuthService(
+            self.credentials,
+            self.repository,
+            self.get_client,
+            task_manager=self.tasks,
+            on_login=self.notify_profile_changed,
+        )
+        self._clients: dict[tuple[str, bool], XiaoheiheApiClient] = {}
+        self._client_locks: dict[tuple[str, bool], asyncio.Lock] = {}
+        self._started = False
+        self._closed = False
+        self._start_lock = asyncio.Lock()
+        self._adapters: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._floor_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+        self._feed_approval_locks: dict[str, asyncio.Lock] = {}
+        self._alerts: dict[str, dict[str, Any]] = {}
+        self._aux_provider_cooldowns: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._configured_adapters: dict[str, dict[str, Any]] = {}
+        self.last_cleanup_at: str | None = None
+        self.config.add_restart_callback(self._on_config_changed)
+
+    @property
+    def started(self) -> bool:
+        return self._started and not self._closed
+
+    async def ensure_started(self) -> None:
+        if self._started:
+            return
+        async with self._start_lock:
+            if self._started:
+                return
+            if self._closed:
+                raise RuntimeError("插件运行时已关闭")
+            await self.database.open()
+            # Preserve all pre-cutover automatic history before a new poller
+            # can claim events.  A failed baseline keeps automatic work closed.
+            if not await initialize_history(self.repository):
+                await self.database.close()
+                raise RuntimeError("自动评论历史基线不可用，适配器未启动")
+            interrupted_candidates = await self.repository.recover_interrupted_feed_sends()
+            self._started = True
+            await self.tasks.start("xhh-cleanup", self._cleanup_loop())
+            await self.tasks.start("xhh-health", self._health_loop())
+            self.logging.emit("INFO", "小黑盒插件运行时已启动")
+            if interrupted_candidates:
+                self.logging.emit(
+                    "WARNING",
+                    "发现更新或重启时中断的主动审核发送，已转入发送状态未知",
+                    details={"candidate_count": interrupted_candidates},
+                )
+
+    async def get_client(self, profile_id: str, anonymous: bool = False) -> XiaoheiheApiClient:
+        await self.ensure_started()
+        key = (profile_id, anonymous)
+        existing = self._clients.get(key)
+        if existing and not existing.closed:
+            return existing
+
+        lock = self._client_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            existing = self._clients.get(key)
+            if existing and not existing.closed:
+                return existing
+
+            credentials = None if anonymous else self.credentials.load(profile_id)
+            if credentials is not None and ensure_client_identity(credentials):
+                self.credentials.save(credentials)
+            config = self.config.snapshot()
+            network = config["network"]
+            reply = config["reply"]
+            client = XiaoheiheApiClient(
+                profile_id,
+                credentials=credentials,
+                request_timeout_seconds=float(network["request_timeout_seconds"]),
+                connect_timeout_seconds=float(network["connect_timeout_seconds"]),
+                read_timeout_seconds=float(network["read_timeout_seconds"]),
+                min_request_interval_seconds=float(network["min_request_interval_seconds"]),
+                max_retries=int(reply["max_retries"]),
+                on_auth_invalid=self._on_auth_invalid,
+            )
+            await client.start()
+            self._clients[key] = client
+            return client
+
+    async def invalidate_client(
+        self,
+        profile_id: str,
+        *,
+        include_anonymous: bool = True,
+    ) -> None:
+        anonymous_modes = (False, True) if include_anonymous else (False,)
+        for anonymous in anonymous_modes:
+            await self._close_client_key((profile_id, anonymous))
+
+    async def _close_client_key(self, key: tuple[str, bool]) -> None:
+        lock = self._client_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            client = self._clients.pop(key, None)
+            if client is not None:
+                await client.close()
+
+    def register_adapter(self, adapter: Any) -> None:
+        self._adapters.add(adapter)
+
+    def unregister_adapter(self, adapter: Any) -> None:
+        self._adapters.discard(adapter)
+
+    def set_configured_adapters(self, configs: list[dict]) -> None:
+        self._configured_adapters = {
+            str(config.get("id", "xiaoheihe")): {
+                "id": str(config.get("id", "xiaoheihe")),
+                "profile_id": str(config.get("profile_id", "default")),
+                "enabled": bool(config.get("enable", False)),
+            }
+            for config in configs
+        }
+
+    def report_adapter_reconcile_failure(
+        self,
+        adapter_id: str,
+        error: BaseException,
+    ) -> None:
+        safe_error = redact_text(str(error))[:500] or type(error).__name__
+        key = f"adapter_reconcile:{adapter_id}"
+        self._alerts[key] = {
+            "key": key,
+            "level": "error",
+            "message": f"适配器实例 {adapter_id} 在插件更新后恢复失败：{safe_error}",
+        }
+        self.logging.emit(
+            "ERROR",
+            f"插件更新后恢复适配器实例失败：{safe_error}",
+            details={"adapter_id": adapter_id, "exception_type": type(error).__name__},
+        )
+
+    def clear_adapter_reconcile_failure(self, adapter_id: str) -> None:
+        self._alerts.pop(f"adapter_reconcile:{adapter_id}", None)
+
+    async def notify_profile_changed(
+        self,
+        profile_id: str,
+        *,
+        preserve_anonymous: bool = False,
+    ) -> None:
+        await self.invalidate_client(
+            profile_id,
+            include_anonymous=not preserve_anonymous,
+        )
+        state = await self.repository.account_state(profile_id)
+        if state.get("status") in {
+            "requesting_qr",
+            "waiting_scan",
+            "success",
+            "logged_out",
+        }:
+            for suffix in ("401", "403", "429", "credential_invalid"):
+                self._alerts.pop(f"{profile_id}:{suffix}", None)
+        for adapter in tuple(self._adapters):
+            if str(adapter.config.get("profile_id", "default")) == profile_id:
+                adapter.request_refresh()
+
+    async def deliver(
+        self,
+        *,
+        event_id: int | None,
+        route: RoutingTarget,
+        content: str,
+        dry_run: bool,
+        generated_ms: int | None = None,
+        proactive: bool = False,
+    ) -> dict[str, Any]:
+        if event_id is not None:
+            previous = await self.repository.db.fetchone(
+                "SELECT status FROM outgoing_replies WHERE incoming_event_id=? ORDER BY id DESC LIMIT 1", (event_id,),
+            )
+            if previous is not None:
+                # Preserve every existing attempt, especially unknown results.
+                # This path performs neither another write nor reconciliation.
+                return {"status": "ignored", "reason": "previous_outgoing_preserved", "external_comment_id": ""}
+            if not await authorize(self.repository, event_id, route, phase="check"):
+                await block_event(self.repository, event_id, "send_not_authorized")
+                return {"status": "ignored", "reason": "automatic_reply_gate", "external_comment_id": ""}
+        elif proactive:
+            return {"status": "ignored", "reason": "automatic_reply_gate", "external_comment_id": ""}
+        config = self.config.snapshot()
+        text = sanitize_reply_text(content, int(config["reply"]["max_reply_chars"]), native_emojis=True)
+        if event_id is not None:
+            await self.repository.mark_event(
+                event_id,
+                EventState.GENERATED,
+                reply_text=text,
+                generated_ms=generated_ms,
+            )
+        if dry_run:
+            await self.repository.record_outgoing_attempt(
+                route.profile_id,
+                event_id,
+                route,
+                text,
+                EventState.DRY_RUN.value,
+            )
+            if event_id is not None:
+                await self.repository.mark_event(
+                    event_id,
+                    EventState.DRY_RUN,
+                    reply_text=text,
+                )
+            return {"status": EventState.DRY_RUN.value, "text": text}
+
+        lock = self._floor_lock(route)
+        async with lock:
+            if event_id is None and await feiyu_unseen_feed.manual_post_blocked(
+                    self.repository, route.post_id, profile_id=route.profile_id):
+                return {"status": "ignored", "reason": "manual_post_preserved", "external_comment_id": ""}
+            if not await feiyu_recovery.normal_send_allowed(self.repository, event_id, route):
+                return {"status": "ignored", "reason": "recovery_post_claimed", "external_comment_id": ""}
+            client = await self.get_client(route.profile_id)
+            if client.credentials is None:
+                if event_id is not None:
+                    await self.repository.mark_event(
+                        event_id,
+                        EventState.DEAD_LETTER,
+                        error="凭证不存在，已停止真实发送",
+                    )
+                raise CredentialInvalidError("凭证不存在，已停止真实发送")
+            if event_id is not None:
+                previous = await self.repository.latest_outgoing_for_event(event_id)
+                if previous is not None:
+                    previous_status = str(previous.get("status") or "")
+                    if previous_status == EventState.SENT.value:
+                        await self.repository.mark_event(
+                            event_id,
+                            EventState.SENT,
+                            reply_text=str(previous.get("content") or text),
+                        )
+                        return {
+                            "status": EventState.SENT.value,
+                            "external_comment_id": str(previous.get("external_comment_id") or ""),
+                            "text": str(previous.get("content") or text),
+                            "duplicate_send_suppressed": True,
+                        }
+                    if previous_status in {"sending", EventState.SEND_UNKNOWN.value}:
+                        confirmed_comment_id = await self._check_uncertain_send(
+                            client,
+                            route,
+                            str(previous.get("content") or text),
+                            int(previous["id"]),
+                            attempted_at=float(previous.get("attempted_at") or time.time()),
+                        )
+                        if confirmed_comment_id:
+                            await self.repository.mark_event(
+                                event_id,
+                                EventState.SENT,
+                                reply_text=str(previous.get("content") or text),
+                            )
+                            return {
+                                "status": EventState.SENT.value,
+                                "external_comment_id": confirmed_comment_id,
+                                "text": str(previous.get("content") or text),
+                                "confirmed_existing_attempt": True,
+                            }
+                        await self.repository.mark_event(
+                            event_id,
+                            EventState.SEND_UNKNOWN,
+                            error="已有评论发送记录尚未确认，已阻止再次发送",
+                        )
+                        raise SendUncertainError(
+                            "已有评论发送记录尚未确认，已阻止再次发送",
+                            category="send_unknown",
+                        )
+                    if previous_status not in {EventState.RETRY_WAIT.value}:
+                        await self.repository.mark_event(
+                            event_id,
+                            EventState.DEAD_LETTER,
+                            error="该事件已有失败的评论发送记录，已阻止再次发送",
+                        )
+                        raise XiaoheiheApiError(
+                            "该事件已有失败的评论发送记录，已阻止再次发送",
+                            category="duplicate_send_guard",
+                        )
+            if event_id is not None:
+                if not await authorize(self.repository, event_id, route, phase="send"):
+                    await block_event(self.repository, event_id, "send_not_authorized")
+                    return {"status": "ignored", "reason": "automatic_reply_gate", "external_comment_id": ""}
+            try:
+                outgoing_id = await self.repository.record_outgoing_attempt(
+                    route.profile_id, event_id, route, text, "sending",
+                )
+            except feiyu_unseen_feed.ManualPostPreserved:
+                return {"status": "ignored", "reason": "manual_post_preserved", "external_comment_id": ""}
+            if event_id is not None:
+                if not await authorize(self.repository, event_id, route, phase="check"):
+                    # This is known to be before the network call; it is never
+                    # an unknown send and must not be retried automatically.
+                    await self.repository.db.execute(
+                        "UPDATE outgoing_replies SET status='failed' WHERE id=? AND status='sending'", (outgoing_id,),
+                    )
+                    await mark_not_sent(self.repository, event_id)
+                    await self.repository.mark_event(event_id, EventState.DEAD_LETTER, error="feiyu_auto_reply_gate:period_changed")
+                    return {"status": "ignored", "reason": "automatic_reply_gate", "external_comment_id": ""}
+            attempted_at = time.time()
+            try:
+                async def before_comment_request() -> bool:
+                    if not await feiyu_recovery.normal_send_allowed(self.repository, event_id, route):
+                        return False
+                    if event_id is None:
+                        return not await feiyu_unseen_feed.manual_post_blocked(
+                            self.repository, route.post_id, profile_id=route.profile_id,
+                            outgoing_id=outgoing_id,
+                        )
+                    return await authorize(self.repository, event_id, route, phase="http")
+
+                result = await client.send_comment(
+                    route, text, before_request=before_comment_request,
+                )
+            except RequestNotAuthorized:
+                # Raised before the HTTP call: this write is known not sent.
+                await self.repository.db.execute(
+                    "UPDATE outgoing_replies SET status='failed', error=? WHERE id=? AND status='sending'",
+                    ("自动评论发送前授权失效", outgoing_id),
+                )
+                if event_id is not None:
+                    await mark_not_sent(self.repository, event_id)
+                    await self.repository.mark_event(
+                        event_id, EventState.DEAD_LETTER,
+                        error="feiyu_auto_reply_gate:period_changed_before_http",
+                    )
+                return {"status": "ignored", "reason": "automatic_reply_gate", "external_comment_id": ""}
+            except SendUncertainError as exc:
+                await self.repository.mark_event(
+                    event_id, EventState.SEND_UNKNOWN, error=str(exc)
+                ) if event_id is not None else None
+                await self.repository.db.execute(
+                    """
+                    UPDATE outgoing_replies
+                    SET status = 'send_unknown', error = ?
+                    WHERE id = ?
+                    """,
+                    (redact_text(str(exc))[:2000], outgoing_id),
+                )
+                # An automatic reply that may already be in flight is retained
+                # as unknown. Do not begin a new read across a price/day boundary.
+                confirmed_comment_id = None
+                if event_id is None:
+                    confirmed_comment_id = await self._check_uncertain_send(
+                        client, route, text, outgoing_id, attempted_at=attempted_at,
+                    )
+                if confirmed_comment_id:
+                    if event_id is not None:
+                        await self.repository.mark_event(
+                            event_id,
+                            EventState.SENT,
+                            reply_text=text,
+                        )
+                    if not proactive:
+                        await self.repository.increment_counter(route.profile_id, reply=1)
+                    return {
+                        "status": EventState.SENT.value,
+                        "external_comment_id": confirmed_comment_id,
+                        "text": text,
+                        "confirmed_after_timeout": True,
+                    }
+                raise
+            except asyncio.CancelledError:
+                await self.repository.db.execute(
+                    """
+                    UPDATE outgoing_replies
+                    SET status = 'send_unknown', error = ?
+                    WHERE id = ?
+                    """,
+                    ("发送任务取消，服务端状态未知", outgoing_id),
+                )
+                if event_id is not None:
+                    await self.repository.mark_event(
+                        event_id,
+                        EventState.SEND_UNKNOWN,
+                        error="发送任务取消，服务端状态未知",
+                    )
+                raise
+            except XiaoheiheApiError as exc:
+                if exc.category == "rate_limited":
+                    await self.repository.db.execute(
+                        """
+                        UPDATE outgoing_replies
+                        SET status = ?, error = ?
+                        WHERE id = ?
+                        """,
+                        ("retry_wait" if event_id is None else "failed", redact_text(str(exc))[:2000], outgoing_id),
+                    )
+                    if event_id is not None:
+                        await self.repository.mark_event(event_id, EventState.DEAD_LETTER, error=str(exc))
+                    raise
+                if exc.category in {"server", "http", "response_shape"}:
+                    await self.repository.db.execute(
+                        """
+                        UPDATE outgoing_replies
+                        SET status = 'send_unknown', error = ?
+                        WHERE id = ?
+                        """,
+                        (redact_text(str(exc))[:2000], outgoing_id),
+                    )
+                    if event_id is not None:
+                        await self.repository.mark_event(
+                            event_id,
+                            EventState.SEND_UNKNOWN,
+                            error=str(exc),
+                        )
+                    confirmed_comment_id = None
+                    if event_id is None:
+                        confirmed_comment_id = await self._check_uncertain_send(
+                            client, route, text, outgoing_id, attempted_at=attempted_at,
+                        )
+                    if confirmed_comment_id:
+                        if event_id is not None:
+                            await self.repository.mark_event(
+                                event_id,
+                                EventState.SENT,
+                                reply_text=text,
+                            )
+                        if not proactive:
+                            await self.repository.increment_counter(
+                                route.profile_id,
+                                reply=1,
+                            )
+                        return {
+                            "status": EventState.SENT.value,
+                            "external_comment_id": confirmed_comment_id,
+                            "text": text,
+                            "confirmed_after_rejected_response": True,
+                        }
+                    raise SendUncertainError(
+                        "评论接口响应无法确认发送结果，已停止自动重试",
+                        category="send_unknown",
+                    ) from exc
+                await self.repository.db.execute(
+                    "UPDATE outgoing_replies SET status = 'failed', error = ? WHERE id = ?",
+                    (redact_text(str(exc))[:2000], outgoing_id),
+                )
+                if event_id is not None:
+                    await self.repository.mark_event(
+                        event_id,
+                        EventState.DEAD_LETTER,
+                        error=str(exc),
+                    )
+                raise
+            confirmation = await self.repository.confirm_outgoing(
+                outgoing_id,
+                result.external_comment_id,
+            )
+            self._log_visual_context_binding(
+                outgoing_id,
+                result.external_comment_id,
+                confirmation,
+            )
+            if event_id is not None:
+                await self.repository.mark_event(event_id, EventState.SENT, reply_text=text)
+            if not proactive:
+                await self.repository.increment_counter(route.profile_id, reply=1)
+            return {
+                "status": EventState.SENT.value,
+                "external_comment_id": result.external_comment_id,
+                "text": text,
+            }
+
+    def _log_visual_context_binding(
+        self,
+        outgoing_id: int,
+        external_comment_id: str,
+        confirmation: dict[str, Any],
+    ) -> None:
+        error = str(confirmation.get("visual_context_error", "") or "")
+        profile_id = str(confirmation.get("profile_id", "") or "")
+        details = {
+            "outgoing_id": outgoing_id,
+            "incoming_event_id": confirmation.get("incoming_event_id"),
+            "external_comment_id": external_comment_id,
+            "visual_context_id": confirmation.get("visual_context_id"),
+        }
+        if error:
+            self.logging.emit(
+                "ERROR",
+                f"评论已确认发送成功，但视觉上下文绑定失败: {error}",
+                profile_id=profile_id,
+                details={
+                    **details,
+                    "exception_type": confirmation.get(
+                        "visual_context_exception_type",
+                        "",
+                    ),
+                    "send_confirmation_preserved": True,
+                },
+            )
+        elif confirmation.get("visual_context_id") is not None:
+            self.logging.emit(
+                "DEBUG",
+                "已将机器人评论 ID 绑定到视觉上下文快照",
+                profile_id=profile_id,
+                details=details,
+            )
+
+    async def capture_feed_candidate(
+        self,
+        *,
+        event_id: int,
+        route: RoutingTarget,
+        content: str,
+        metadata: dict[str, Any],
+        generated_ms: int | None = None,
+    ) -> int | None:
+        if not await authorize(self.repository, event_id, route, phase="check"):
+            await block_event(self.repository, event_id, "candidate_not_authorized")
+            return None
+        config = self.config.snapshot()
+        text = sanitize_reply_text(content, int(config["reply"]["max_reply_chars"]), native_emojis=True)
+        candidate_id = await self.repository.create_feed_candidate(
+            route.profile_id,
+            route.post_id,
+            str(metadata.get("post_title", "")),
+            str(metadata.get("post_author_uid", "")),
+            text,
+            str(metadata.get("candidate_reason", "AI 候选回复")),
+            incoming_event_id=event_id,
+        )
+        await self.repository.mark_event(
+            event_id,
+            EventState.GENERATED,
+            reply_text=text,
+            generated_ms=generated_ms,
+        )
+        return candidate_id
+
+    async def expire_reply(
+        self,
+        *,
+        event_id: int | None,
+        route: RoutingTarget,
+        generated_ms: int,
+        reply_timeout_seconds: int,
+    ) -> None:
+        error = (
+            f"AstrBot 原生推理耗时 {generated_ms}ms，超过本事件 "
+            f"{reply_timeout_seconds}s 回复截止时间；已抑制迟到评论以避免重复发送"
+        )
+        if event_id is not None:
+            await self.repository.mark_event(
+                event_id,
+                EventState.DEAD_LETTER,
+                error=error,
+                generated_ms=generated_ms,
+            )
+        self.logging.emit(
+            "WARNING",
+            error,
+            profile_id=route.profile_id,
+            details={"session_id": route.session_id},
+        )
+
+    async def fail_reply(
+        self,
+        *,
+        event_id: int | None,
+        route: RoutingTarget,
+        error: str,
+        generated_ms: int,
+    ) -> None:
+        if event_id is not None:
+            row = await self.repository.db.fetchone(
+                "SELECT status FROM incoming_events WHERE id = ?",
+                (event_id,),
+            )
+            status = str(row["status"]) if row else ""
+            if status not in {
+                EventState.RETRY_WAIT.value,
+                EventState.SEND_UNKNOWN.value,
+                EventState.SENT.value,
+                EventState.DRY_RUN.value,
+                EventState.IGNORED.value,
+                EventState.DEAD_LETTER.value,
+            }:
+                await self.repository.mark_event(
+                    event_id,
+                    EventState.DEAD_LETTER,
+                    error=error,
+                    generated_ms=generated_ms,
+                )
+        self.logging.emit(
+            "WARNING",
+            error,
+            profile_id=route.profile_id,
+            details={"session_id": route.session_id},
+        )
+
+    def feed_service(
+        self, profile_id: str, client: XiaoheiheApiClient, synthetic_dispatch
+    ) -> FeedService:
+        return FeedService(
+            profile_id,
+            self.config.snapshot(),
+            client,
+            self.repository,
+            synthetic_dispatch,
+            lambda route, text: self.deliver(
+                event_id=route.incoming_event_id,
+                route=route,
+                content=text,
+                dry_run=False,
+                proactive=True,
+            ),
+            approval_lock=self._feed_approval_locks.setdefault(
+                profile_id,
+                asyncio.Lock(),
+            ),
+        )
+
+    def _floor_lock(self, route: RoutingTarget) -> asyncio.Lock:
+        key = f"{route.profile_id}:{route.session_id}"
+        lock = self._floor_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._floor_locks[key] = lock
+        self._floor_locks.move_to_end(key)
+        while len(self._floor_locks) > 1024:
+            old_key, old_lock = next(iter(self._floor_locks.items()))
+            if old_lock.locked():
+                self._floor_locks.move_to_end(old_key)
+                break
+            self._floor_locks.pop(old_key, None)
+        return lock
+
+    async def _check_uncertain_send(
+        self,
+        client: XiaoheiheApiClient,
+        route: RoutingTarget,
+        content: str,
+        outgoing_id: int,
+        *,
+        attempted_at: float,
+    ) -> str | None:
+        """Check recent comments, but never infer absence from an unverified API."""
+
+        try:
+            comments = await client.recent_comments(route, limit=30)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logging.emit(
+                "ERROR",
+                f"发送状态未知且核对失败: {exc}",
+                profile_id=route.profile_id,
+            )
+            return None
+        self_uid = client.credentials.uid if client.credentials else ""
+        normalized = sanitize_reply_text(
+            content, int(self.config.snapshot()["reply"]["max_reply_chars"])
+        )
+        for comment in comments:
+            user = comment.get("user", comment.get("sender", {}))
+            user = user if isinstance(user, dict) else {}
+            uid = str(
+                user.get(
+                    "uid",
+                    user.get(
+                        "heybox_id",
+                        user.get(
+                            "heyboxid",
+                            user.get("user_id", user.get("userid", user.get("id", ""))),
+                        ),
+                    ),
+                )
+            )
+            candidate = str(comment.get("content", comment.get("text", ""))).strip()
+            comment_id = str(comment.get("comment_id", comment.get("id", "")))
+            timestamp_value = comment.get(
+                "created_at",
+                comment.get("timestamp", comment.get("time")),
+            )
+            try:
+                comment_time = float(timestamp_value)
+                if comment_time > 10_000_000_000:
+                    comment_time /= 1000
+            except (TypeError, ValueError):
+                continue
+            within_window = attempted_at - 600 <= comment_time <= time.time() + 120
+            if (
+                self_uid
+                and uid == self_uid
+                and candidate == normalized
+                and comment_id
+                and within_window
+            ):
+                confirmation = await self.repository.confirm_outgoing(outgoing_id, comment_id)
+                self._log_visual_context_binding(
+                    outgoing_id,
+                    comment_id,
+                    confirmation,
+                )
+                self.logging.emit(
+                    "WARNING",
+                    "发送超时后在目标楼层核对到相同机器人评论，已确认成功",
+                    profile_id=route.profile_id,
+                )
+                return comment_id
+        self.logging.emit(
+            "WARNING",
+            "发送状态未知；近期列表未发现匹配项，但因接口一致性未验证，不自动重试",
+            profile_id=route.profile_id,
+        )
+        return None
+
+    async def status(self) -> dict[str, Any]:
+        await self.ensure_started()
+        provider_cooldowns = self._active_aux_provider_cooldowns()
+        profiles = []
+        alerts = dict(self._alerts)
+        for profile in self.config.enabled_profiles():
+            profile_id = str(profile["profile_id"])
+            state = await self.repository.account_state(profile_id)
+            counters = await self.repository.today_counters(profile_id)
+            client = self._clients.get((profile_id, False))
+            if client is not None:
+                state["last_success_request_at"] = client.last_success_at or state.get(
+                    "last_success_request_at"
+                )
+                if client.last_error:
+                    state["last_client_error"] = client.last_error
+                    if client.last_error.get("category") == "response_shape":
+                        alerts[f"{profile_id}:response_shape"] = {
+                            "key": f"{profile_id}:response_shape",
+                            "level": "error",
+                            "message": f"账号 {profile_id} 的小黑盒 API 响应结构可能已变化",
+                        }
+                state["consecutive_429"] = max(
+                    int(state.get("consecutive_429") or 0),
+                    client.consecutive_status[429],
+                )
+                state["notification_polls"] = client.last_notification_polls
+            if state.get("status") == "credential_invalid":
+                alerts[f"{profile_id}:credential_invalid"] = {
+                    "key": f"{profile_id}:credential_invalid",
+                    "level": "error",
+                    "message": f"账号 {profile_id} 登录凭证已失效",
+                }
+            if int(state.get("consecutive_poll_failures") or 0) >= 3:
+                reason = str(state.get("last_error") or "请查看运行日志")
+                alerts[f"{profile_id}:polling"] = {
+                    "key": f"{profile_id}:polling",
+                    "level": "error",
+                    "message": f"账号 {profile_id} 连续轮询失败：{reason[:300]}",
+                }
+            if int(state.get("consecutive_429") or 0) >= 3:
+                alerts[f"{profile_id}:429"] = {
+                    "key": f"{profile_id}:429",
+                    "level": "warning",
+                    "message": f"账号 {profile_id} 持续受到 HTTP 429 限流",
+                }
+            profiles.append(
+                {
+                    **state,
+                    **counters,
+                    "dry_run": bool(profile.get("dry_run", True)),
+                    "has_credentials": self.credentials.exists(profile_id),
+                }
+            )
+        task_failures = self.tasks.failures()
+        if task_failures:
+            latest_failure = task_failures[-1]
+            alerts["background_task"] = {
+                "key": "background_task",
+                "level": "error",
+                "message": (f"后台任务退出: {latest_failure['task']} — {latest_failure['error']}"),
+            }
+        adapters = [
+            {
+                "id": str(adapter.config.get("id", "xiaoheihe")),
+                "profile_id": str(adapter.config.get("profile_id", "default")),
+                "running": bool(adapter.running),
+                "enabled": True,
+            }
+            for adapter in tuple(self._adapters)
+        ]
+        active_ids = {adapter["id"] for adapter in adapters}
+        adapters.extend(
+            {
+                **configured,
+                "running": False,
+            }
+            for adapter_id, configured in self._configured_adapters.items()
+            if adapter_id not in active_ids
+        )
+        return {
+            "version": f"v{__version__}",
+            "profiles": profiles,
+            "adapters": adapters,
+            "tasks": self.tasks.task_names(),
+            "task_failures": task_failures,
+            "queue_length": sum(
+                getattr(adapter, "queue_length", 0) for adapter in tuple(self._adapters)
+            ),
+            "database_size": self.repository.database_size(),
+            "log_size": self.logging.total_size(),
+            "provider_cooldowns": provider_cooldowns,
+            "alerts": list(alerts.values()),
+            "last_cleanup_at": self.last_cleanup_at,
+        }
+
+    @staticmethod
+    def _aux_provider_key(profile_id: str, purpose: str, provider_id: str) -> tuple[str, str, str]:
+        return (
+            str(profile_id or "default")[:128],
+            str(purpose or "auxiliary")[:64],
+            str(provider_id or "current-session")[:256],
+        )
+
+    @staticmethod
+    def _aux_provider_alert_key(key: tuple[str, str, str]) -> str:
+        profile_id, purpose, provider_id = key
+        return f"aux_provider:{profile_id}:{purpose}:{provider_id}"
+
+    @staticmethod
+    def _aux_provider_cooldown_seconds(error: BaseException) -> int:
+        status_code = getattr(error, "status_code", None)
+        if not isinstance(status_code, int):
+            response = getattr(error, "response", None)
+            status_code = getattr(response, "status_code", None)
+        if status_code in {401, 403}:
+            return 300
+        if status_code == 429:
+            return 120
+        message = str(error).casefold()
+        if any(
+            marker in message
+            for marker in ("error code: 401", "error code: 403", "http 401", "http 403")
+        ):
+            return 300
+        if "error code: 429" in message or "http 429" in message:
+            return 120
+        if isinstance(error, TimeoutError) or "timeout" in message or "timed out" in message:
+            return 60
+        if "permission" in message or "forbidden" in message:
+            return 300
+        return 60
+
+    def auxiliary_provider_available(
+        self,
+        profile_id: str,
+        purpose: str,
+        provider_id: str,
+    ) -> bool:
+        key = self._aux_provider_key(profile_id, purpose, provider_id)
+        state = self._aux_provider_cooldowns.get(key)
+        if state is None:
+            return True
+        if float(state.get("until", 0)) > time.time():
+            return False
+        self._aux_provider_cooldowns.pop(key, None)
+        self._alerts.pop(self._aux_provider_alert_key(key), None)
+        self.logging.emit(
+            "INFO",
+            "辅助模型冷却结束，将在需要时重新尝试",
+            profile_id=key[0],
+            details={"purpose": key[1], "provider_id": key[2]},
+        )
+        return True
+
+    def report_auxiliary_provider_failure(
+        self,
+        profile_id: str,
+        purpose: str,
+        provider_id: str,
+        error: BaseException,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        key = self._aux_provider_key(profile_id, purpose, provider_id)
+        now = time.time()
+        cooldown_seconds = self._aux_provider_cooldown_seconds(error)
+        existing = self._aux_provider_cooldowns.get(key)
+        safe_error = redact_log_text(str(error))[:1000] or type(error).__name__
+        status_code = getattr(error, "status_code", None)
+        if not isinstance(status_code, int):
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+        cause = error.__cause__ or error.__context__
+        safe_cause = (
+            redact_log_text(str(cause))[:500] if cause is not None and cause is not error else ""
+        )
+        state = {
+            "profile_id": key[0],
+            "purpose": key[1],
+            "provider_id": key[2],
+            "until": now + cooldown_seconds,
+            "cooldown_seconds": cooldown_seconds,
+            "last_error": safe_error,
+        }
+        self._aux_provider_cooldowns[key] = state
+        label = AUX_PROVIDER_PURPOSE_LABELS.get(key[1], key[1])
+        alert_key = self._aux_provider_alert_key(key)
+        self._alerts[alert_key] = {
+            "key": alert_key,
+            "level": "warning",
+            "message": (
+                f"{label}辅助模型 {key[2]} 调用失败，已冷却 {cooldown_seconds} 秒；"
+                "冷却期间自动跳过该辅助调用并走降级/备用路径，不会停掉主对话回复。"
+            ),
+        }
+        if existing is None or float(existing.get("until", 0)) <= now:
+            failure_details = dict(details or {})
+            failure_details.update(
+                {
+                    "purpose": key[1],
+                    "provider_id": key[2],
+                    "cooldown_seconds": cooldown_seconds,
+                    "cooldown_until_epoch": round(now + cooldown_seconds, 3),
+                    "exception_type": type(error).__name__,
+                    "exception_module": type(error).__module__,
+                    "error_message": safe_error,
+                    "http_status_code": status_code if isinstance(status_code, int) else None,
+                    "cause_exception_type": type(cause).__name__ if cause is not None else "",
+                    "cause_error_message": safe_cause,
+                }
+            )
+            self.logging.emit(
+                "WARNING",
+                f"{label}辅助模型调用失败，已进入冷却: {safe_error}",
+                profile_id=key[0],
+                details=failure_details,
+            )
+
+    def report_auxiliary_provider_success(
+        self,
+        profile_id: str,
+        purpose: str,
+        provider_id: str,
+    ) -> None:
+        key = self._aux_provider_key(profile_id, purpose, provider_id)
+        previous = self._aux_provider_cooldowns.pop(key, None)
+        self._alerts.pop(self._aux_provider_alert_key(key), None)
+        if previous is not None:
+            label = AUX_PROVIDER_PURPOSE_LABELS.get(key[1], key[1])
+            self.logging.emit(
+                "INFO",
+                f"{label}辅助模型调用已恢复",
+                profile_id=key[0],
+                details={"purpose": key[1], "provider_id": key[2]},
+            )
+
+    def clear_auxiliary_provider_cooldown(
+        self,
+        profile_id: str,
+        purpose: str,
+        provider_id: str,
+    ) -> bool:
+        key = self._aux_provider_key(profile_id, purpose, provider_id)
+        previous = self._aux_provider_cooldowns.pop(key, None)
+        self._alerts.pop(self._aux_provider_alert_key(key), None)
+        if previous is None:
+            return False
+        label = AUX_PROVIDER_PURPOSE_LABELS.get(key[1], key[1])
+        self.logging.emit(
+            "INFO",
+            f"已由 WebUI 手动结束{label}辅助模型冷却",
+            profile_id=key[0],
+            details={"purpose": key[1], "provider_id": key[2]},
+        )
+        return True
+
+    def _active_aux_provider_cooldowns(self) -> list[dict[str, Any]]:
+        now = time.time()
+        result: list[dict[str, Any]] = []
+        for key, state in tuple(self._aux_provider_cooldowns.items()):
+            until = float(state.get("until", 0))
+            if until <= now:
+                self._aux_provider_cooldowns.pop(key, None)
+                self._alerts.pop(self._aux_provider_alert_key(key), None)
+                continue
+            result.append(
+                {
+                    **state,
+                    "remaining_seconds": max(1, int(until - now)),
+                }
+            )
+        result.sort(key=lambda item: (item["profile_id"], item["purpose"], item["provider_id"]))
+        return result
+
+    async def _on_auth_invalid(self, profile_id: str, status_code: int) -> None:
+        field = f"consecutive_{status_code}"
+        state = await self.repository.account_state(profile_id)
+        count = int(state.get(field, 0)) + 1
+        circuit_seconds = 300 if status_code == 401 else 600
+        await self.repository.update_account_state(
+            profile_id,
+            status="credential_invalid" if status_code == 401 else "failed",
+            **{
+                field: count,
+                "circuit_open_until": time.time() + circuit_seconds,
+                "last_error": f"连续 HTTP {status_code}",
+            },
+        )
+        self._alerts[f"{profile_id}:{status_code}"] = {
+            "key": f"{profile_id}:{status_code}",
+            "level": "error",
+            "message": f"账号 {profile_id} 连续出现 HTTP {status_code}，已停止真实发送",
+        }
+        await self.notify_profile_changed(profile_id)
+
+    async def _on_config_changed(self, changed: set[str]) -> None:
+        snapshot = self.config.snapshot()
+        if changed & {"logging", "retention"}:
+            logging_config = snapshot["logging"]
+            self.logging.reconfigure(
+                level=str(logging_config["level"]),
+                max_memory_entries=int(logging_config["max_memory_entries"]),
+                total_limit_mb=int(snapshot["retention"]["log_total_limit_mb"]),
+            )
+        if changed & {"network", "reply"}:
+            for key in tuple(set(self._clients) | set(self._client_locks)):
+                await self._close_client_key(key)
+        self.logging.emit(
+            "INFO",
+            "配置已保存并通知相关后台任务安全重载",
+            details={"changed_sections": sorted(changed)},
+        )
+        for adapter in tuple(self._adapters):
+            adapter.request_refresh()
+
+    def report_vision_degraded(self, profile_id: str, image_count: int) -> None:
+        key = "vision_unsupported"
+        if key not in self._alerts:
+            self.logging.emit(
+                "WARNING",
+                "图片理解链未获得可用描述，本轮已安全降级为纯文本",
+                profile_id=profile_id,
+                details={"omitted_image_count": image_count},
+            )
+        self._alerts[key] = {
+            "key": key,
+            "level": "warning",
+            "message": "本轮图片理解链未获得可用描述；原图已隔离，主模型不会据此猜图",
+        }
+
+    def clear_vision_alert(self) -> None:
+        self._alerts.pop("vision_unsupported", None)
+
+    def set_provider_route_warning(self, profile_id: str, message: str) -> None:
+        key = f"{str(profile_id or 'default')[:128]}:provider_route"
+        previous = self._alerts.get(key)
+        if not message:
+            if previous is not None:
+                self._alerts.pop(key, None)
+                self.logging.emit(
+                    "INFO",
+                    "Provider 路由配置警告已解除",
+                    profile_id=profile_id,
+                )
+            return
+        self._alerts[key] = {
+            "key": key,
+            "level": "warning",
+            "message": str(message)[:1000],
+        }
+
+    def report_segmented_reply_aggregated(self, profile_id: str) -> None:
+        key = "astrbot_segmented_reply"
+        if key not in self._alerts:
+            self.logging.emit(
+                "WARNING",
+                "检测到 AstrBot 分段回复，小黑盒已自动合并为一条评论",
+                profile_id=profile_id,
+            )
+        self._alerts[key] = {
+            "key": key,
+            "level": "warning",
+            "message": (
+                "AstrBot 当前启用了分段回复；小黑盒已自动合并为一条评论。"
+                "可在 AstrBot 平台设置中关闭分段回复以减少等待。"
+            ),
+        }
+
+    def report_proactive_circuit(self, profile_id: str, error: BaseException) -> None:
+        self.logging.emit(
+            "ERROR",
+            f"主动刷帖任务失败，至少熔断 300 秒: {error}",
+            profile_id=profile_id,
+        )
+        self._alerts[f"{profile_id}:proactive_circuit"] = {
+            "key": f"{profile_id}:proactive_circuit",
+            "level": "error",
+            "message": f"账号 {profile_id} 的主动刷帖已进入冷却熔断",
+        }
+
+    def clear_proactive_circuit(self, profile_id: str) -> None:
+        self._alerts.pop(f"{profile_id}:proactive_circuit", None)
+
+    async def _cleanup_loop(self) -> None:
+        await self._cleanup_sleep(60)
+        while True:
+            retry_delay = 86400
+            try:
+                await self._run_cleanup_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                safe_error = redact_text(str(exc))[:1000] or type(exc).__name__
+                retry_delay = 3600
+                self._alerts["cleanup"] = {
+                    "key": "cleanup",
+                    "level": "warning",
+                    "message": f"自动清理失败，将在一小时后重试：{safe_error}",
+                }
+                self.logging.emit(
+                    "ERROR",
+                    f"自动安全清理失败：{safe_error}",
+                    details={"exception_type": type(exc).__name__},
+                )
+                with suppress(Exception):
+                    await self.repository.add_runtime_error(
+                        "cleanup",
+                        safe_error,
+                        details={"exception_type": type(exc).__name__},
+                    )
+            await self._cleanup_sleep(retry_delay)
+
+    async def _cleanup_sleep(self, delay: float) -> None:
+        await asyncio.sleep(delay)
+
+    async def _run_cleanup_once(self) -> None:
+        config = self.config.snapshot()
+        removed = await self.repository.cleanup(config["retention"])
+        pruned = await self.repository.prune_event_bodies(config["retention"])
+        pressure = await self.repository.enforce_soft_limit(config["retention"])
+        self.last_cleanup_at = _iso_now()
+        self._alerts.pop("cleanup", None)
+        self.logging.emit(
+            "INFO",
+            "自动安全清理完成",
+            details={
+                "removed": removed,
+                "pruned_bodies": pruned,
+                "storage_pressure": pressure,
+            },
+        )
+
+    async def _health_loop(self) -> None:
+        while True:
+            try:
+                await self.repository.db.fetchone("SELECT 1 AS ok")
+                size_mb = self.repository.database_size() / 1024 / 1024
+                retention = self.config.snapshot()["retention"]
+                warn_mb = float(retention["database_warn_mb"])
+                key = "database_size"
+                if size_mb >= warn_mb:
+                    self._alerts[key] = {
+                        "key": key,
+                        "level": "warning",
+                        "message": f"数据库已达到 {size_mb:.1f} MB",
+                    }
+                else:
+                    self._alerts.pop(key, None)
+                soft_mb = float(retention["database_soft_limit_mb"])
+                if size_mb >= soft_mb:
+                    self._alerts["database_soft_limit"] = {
+                        "key": "database_soft_limit",
+                        "level": "error",
+                        "message": f"数据库已超过 {soft_mb:.0f} MB 软上限，将分批清理低优先级正文",
+                    }
+                else:
+                    self._alerts.pop("database_soft_limit", None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._alerts["database"] = {
+                    "key": "database",
+                    "level": "error",
+                    "message": f"数据库不可写或健康检查失败: {exc}",
+                }
+            await asyncio.sleep(60)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for adapter in tuple(self._adapters):
+            with suppress(BaseException):
+                await adapter.terminate()
+        await self.tasks.close()
+        for client in tuple(self._clients.values()):
+            with suppress(BaseException):
+                await client.close()
+        self._clients.clear()
+        self._client_locks.clear()
+        if self._started:
+            await self.database.close()
+        self.logging.close()
+        self._floor_locks.clear()
+        self._feed_approval_locks.clear()
+        self._configured_adapters.clear()
+        self._started = False
+        unbind_runtime(self)
+
+
+def _iso_now() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()

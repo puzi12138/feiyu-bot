@@ -1,0 +1,653 @@
+"""LLM Hook handler — parallel context retrieval, prompt injection, performance tracking.
+
+Orchestrates all context providers (social, V2, diversity, jargon, few-shot, session updates)
+in parallel, merges results, and injects them into the LLM request via
+``extra_user_content_parts`` to preserve system_prompt prefix caching.
+
+Long-term memory injection contract:
+* V2 local memory may only enter this hook as ``related_memories``.
+* When memory is delegated to LivingMemory, local V2 memories are stripped here.
+* Memory text is formatted into a dynamic late section and never written into
+  the stable persona/system prompt unless the framework lacks late-part support.
+"""
+
+import asyncio
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent
+
+from ..monitoring.instrumentation import monitored
+try:
+    from ...config import CACHE_FRIENDLY_LLM_HOOK_TARGET, LEGACY_LLM_HOOK_TARGETS
+except ImportError:
+    from config import CACHE_FRIENDLY_LLM_HOOK_TARGET, LEGACY_LLM_HOOK_TARGETS
+try:
+    from ...utils.persona_selection import get_event_persona_scope
+except ImportError:
+    from utils.persona_selection import get_event_persona_scope
+try:
+    from ...services.commands.command_filter import CommandFilter
+except ImportError:
+    from services.commands.command_filter import CommandFilter
+
+try:
+    from astrbot.core.agent.message import TextPart
+except ImportError:
+    TextPart = None
+
+from .perf_tracker import PerfTracker
+
+
+class LLMHookHandler:
+    """Orchestrate LLM Hook context injection.
+
+    Runs all context providers in parallel via ``asyncio.gather``, merges
+    results in priority order, and records timing data.
+
+    Args:
+        plugin_config: Plugin configuration object.
+        diversity_manager: Diversity prompt builder service.
+        social_context_injector: Social context injector service.
+        v2_integration: V2 learning integration service.
+        jargon_query_service: Jargon query service.
+        temporary_persona_updater: Session-level persona updater.
+        perf_tracker: ``PerfTracker`` for recording timing samples.
+        group_id_to_unified_origin: Shared mapping from group_id to UMO.
+        db_manager: Database manager for approved few-shot retrieval.
+    """
+
+    def __init__(
+        self,
+        plugin_config: Any,
+        diversity_manager: Any,
+        social_context_injector: Any,
+        v2_integration: Any,
+        jargon_query_service: Any,
+        temporary_persona_updater: Any,
+        perf_tracker: PerfTracker,
+        group_id_to_unified_origin: Dict[str, str],
+        db_manager: Any = None,
+        feature_delegation: Any = None,
+        shadow_mode_service: Any = None,
+    ) -> None:
+        self._config = plugin_config
+        self._diversity_manager = diversity_manager
+        self._social_context_injector = social_context_injector
+        self._v2_integration = v2_integration
+        self._jargon_query_service = jargon_query_service
+        self._temporary_persona_updater = temporary_persona_updater
+        self._perf_tracker = perf_tracker
+        self._group_id_to_unified_origin = group_id_to_unified_origin
+        self._db_manager = db_manager
+        self._feature_delegation = feature_delegation
+        self._shadow_mode_service = shadow_mode_service
+        self._command_filter = CommandFilter()
+        if self._shadow_mode_service is None and db_manager is not None:
+            try:
+                from ..shadow_mode import ShadowModeService
+
+                self._shadow_mode_service = ShadowModeService(db_manager)
+            except Exception as exc:
+                logger.debug(f"[LLM Hook] 影子模式服务初始化失败: {exc}")
+
+    # Public API
+
+    @monitored
+    async def handle(self, event: AstrMessageEvent, req: Any) -> None:
+        """Process an LLM request hook — inject context into *req*."""
+        hook_start = time.time()
+        social_ms = v2_ms = diversity_ms = jargon_ms = few_shots_ms = shadow_ms = 0.0
+
+        try:
+            if req is None:
+                logger.warning("[LLM Hook] req 参数为 None，跳过注入")
+                return
+
+            if not getattr(self._config, "enable_llm_hooks", False):
+                logger.debug("[LLM Hook] 总开关未启用，跳过上下文注入")
+                return
+
+            # 命令/系统级唤醒词消息直接放行：命令回复追求即时响应，
+            # 上下文注入对命令处理没有价值，反而会占用最长 3s 的预算。
+            if getattr(self._config, "enable_command_pass_through", True):
+                message_text = (
+                    getattr(event, "message_str", None) or event.get_message_str()
+                )
+                if self._command_filter.is_command_text(message_text):
+                    logger.debug(
+                        f"[LLM Hook] 命令消息直接放行，跳过上下文注入: "
+                        f"{str(message_text)[:80]}"
+                    )
+                    return
+
+            if not self._diversity_manager:
+                logger.debug("[LLM Hook] diversity_manager未初始化,跳过多样性注入")
+                return
+
+            group_id = event.get_group_id() or event.get_sender_id()
+            user_id = event.get_sender_id()
+            persona_id = get_event_persona_scope(event, self._config)
+
+            # Maintain group_id → unified_msg_origin mapping
+            if hasattr(event, "unified_msg_origin") and event.unified_msg_origin:
+                self._group_id_to_unified_origin[group_id] = event.unified_msg_origin
+                logger.debug(f"[LLM Hook] 更新映射: {group_id} -> {event.unified_msg_origin}")
+
+            if not req.prompt:
+                logger.debug("[LLM Hook] req.prompt为空,跳过多样性注入")
+                return
+
+            original_prompt_length = len(req.prompt)
+            logger.debug(
+                f"[LLM Hook] 开始注入多样性增强 "
+                f"(group: {group_id}, 原prompt长度: {original_prompt_length})"
+            )
+
+            prompt_injections: List[str] = []
+            logger.debug("[LLM Hook] 跳过基础人格注入（框架已处理），专注于增量内容")
+
+            # Parallel context retrieval
+            social_result: Optional[str] = None
+            v2_result: Optional[Dict[str, Any]] = None
+            diversity_result: Optional[str] = None
+            jargon_result: Optional[str] = None
+            few_shots_result: Optional[str] = None
+            shadow_result: Optional[str] = None
+
+            _ctx_timeout = getattr(self._config, "llm_hook_context_timeout", 3.0)
+
+            async def _timed_social() -> None:
+                nonlocal social_result, social_ms
+                t0 = time.time()
+                try:
+                    social_result = await asyncio.wait_for(
+                        self._fetch_social(group_id, user_id, persona_id),
+                        timeout=_ctx_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[LLM Hook] social context timed out ({_ctx_timeout}s)")
+                social_ms = (time.time() - t0) * 1000
+
+            async def _timed_v2() -> None:
+                nonlocal v2_result, v2_ms
+                t0 = time.time()
+                try:
+                    v2_result = await asyncio.wait_for(
+                        self._fetch_v2(req.prompt, group_id), timeout=_ctx_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[LLM Hook] V2 context timed out ({_ctx_timeout}s)")
+                v2_ms = (time.time() - t0) * 1000
+
+            async def _timed_diversity() -> None:
+                nonlocal diversity_result, diversity_ms
+                t0 = time.time()
+                try:
+                    diversity_result = await asyncio.wait_for(
+                        self._fetch_diversity(group_id), timeout=_ctx_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[LLM Hook] diversity timed out ({_ctx_timeout}s)")
+                diversity_ms = (time.time() - t0) * 1000
+
+            async def _timed_jargon() -> None:
+                nonlocal jargon_result, jargon_ms
+                t0 = time.time()
+                try:
+                    jargon_result = await asyncio.wait_for(
+                        self._fetch_jargon(event, group_id), timeout=_ctx_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[LLM Hook] jargon timed out ({_ctx_timeout}s)")
+                jargon_ms = (time.time() - t0) * 1000
+
+            async def _timed_few_shots() -> None:
+                nonlocal few_shots_result, few_shots_ms
+                t0 = time.time()
+                try:
+                    few_shots_result = await asyncio.wait_for(
+                        self._fetch_few_shots(group_id), timeout=_ctx_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[LLM Hook] few-shots timed out ({_ctx_timeout}s)")
+                few_shots_ms = (time.time() - t0) * 1000
+
+            async def _timed_shadow() -> None:
+                nonlocal shadow_result, shadow_ms
+                t0 = time.time()
+                try:
+                    shadow_result = await asyncio.wait_for(
+                        self._fetch_shadow(group_id), timeout=_ctx_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[LLM Hook] shadow mode timed out ({_ctx_timeout}s)")
+                shadow_ms = (time.time() - t0) * 1000
+
+            await asyncio.gather(
+                _timed_social(),
+                _timed_v2(),
+                _timed_diversity(),
+                _timed_jargon(),
+                _timed_few_shots(),
+                _timed_shadow(),
+            )
+
+            # Merge results in priority order
+            self._collect_social(social_result, group_id, prompt_injections)
+            self._collect_v2(v2_result, v2_ms, prompt_injections)
+            self._collect_diversity(diversity_result, prompt_injections)
+            self._collect_jargon(jargon_result, prompt_injections)
+            self._collect_few_shots(few_shots_result, prompt_injections)
+            self._collect_shadow(shadow_result, prompt_injections)
+            self._collect_session_updates(group_id, prompt_injections)
+
+            # Inject into request
+            if prompt_injections:
+                self._inject(req, prompt_injections, hook_start)
+            else:
+                logger.debug("[LLM Hook] 没有可注入的增量内容")
+
+            # Record perf data
+            total_ms = (time.time() - hook_start) * 1000
+            self._perf_tracker.record(
+                {
+                    "ts": time.time(),
+                    "total_ms": round(total_ms, 1),
+                    "social_ctx_ms": round(social_ms, 1),
+                    "v2_ctx_ms": round(v2_ms, 1),
+                    "diversity_ms": round(diversity_ms, 1),
+                    "jargon_ms": round(jargon_ms, 1),
+                    "few_shots_ms": round(few_shots_ms, 1),
+                    "shadow_ms": round(shadow_ms, 1),
+                    "group_id": group_id,
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"[LLM Hook] 框架层面注入多样性失败: {e}", exc_info=True)
+
+    # Context fetchers
+
+    @monitored
+    async def _fetch_social(
+        self,
+        group_id: str,
+        user_id: str,
+        persona_id: str = "default",
+    ) -> Optional[str]:
+        social_enabled = bool(
+            getattr(self._config, "enable_social_context_injection", True)
+        )
+        if not social_enabled:
+            logger.debug("[LLM Hook] 社交关系上下文注入已关闭，跳过社交上下文")
+            return None
+        if not self._social_context_injector:
+            logger.debug("[LLM Hook] social_context_injector未初始化，跳过社交上下文注入")
+            return None
+        try:
+            return await self._social_context_injector.format_complete_context(
+                group_id=group_id,
+                user_id=user_id,
+                persona_id=persona_id,
+                include_social_relations=self._config.include_social_relations,
+                include_affection=self._config.include_affection_info,
+                include_mood=False,
+                include_expression_patterns=self._config.enable_expression_patterns,
+                include_psychological=True,
+                include_behavior_guidance=social_enabled,
+                include_conversation_goal=self._config.enable_goal_driven_chat,
+                enable_protection=True,
+            )
+        except Exception as e:
+            logger.warning(f"[LLM Hook] 注入社交上下文失败: {e}")
+            return None
+
+    @monitored
+    async def _fetch_v2(
+        self, prompt: str, group_id: str
+    ) -> Optional[Dict[str, Any]]:
+        if not self._v2_integration:
+            return None
+        try:
+            result = await self._v2_integration.get_enhanced_context(
+                prompt, group_id, top_k=self._config.rerank_top_k
+            )
+            if self._memory_delegated() and result and result.get("related_memories"):
+                result = dict(result)
+                result.pop("related_memories", None)
+                logger.debug("[LLM Hook] 记忆已委托给 LivingMemory，跳过本地 V2 记忆注入")
+            return result
+        except Exception as e:
+            logger.debug(f"[LLM Hook] V2 context retrieval failed: {e}")
+            return None
+
+    def _memory_delegated(self) -> bool:
+        delegation = self._feature_delegation
+        if not delegation or not hasattr(delegation, "should_delegate_memory"):
+            return False
+        try:
+            return bool(delegation.should_delegate_memory())
+        except Exception:
+            return False
+
+    @monitored
+    async def _fetch_diversity(self, group_id: str) -> Optional[str]:
+        try:
+            content = await self._diversity_manager.build_diversity_prompt_injection(
+                "",
+                group_id=group_id,
+                inject_style=True,
+                inject_pattern=True,
+                inject_variation=True,
+                inject_history=True,
+            )
+            return content.strip() if content else None
+        except Exception as e:
+            logger.warning(f"[LLM Hook] 多样性增强失败: {e}")
+            return None
+
+    @monitored
+    async def _fetch_jargon(
+        self, event: AstrMessageEvent, group_id: str
+    ) -> Optional[str]:
+        if not self._jargon_query_service or not self._config.enable_jargon_learning:
+            logger.debug("[LLM Hook] jargon_query_service未初始化或黑话学习已关闭，跳过黑话注入")
+            return None
+        try:
+            user_message = (
+                event.message_str
+                if hasattr(event, "message_str")
+                else str(event.get_message())
+            )
+            return await self._jargon_query_service.check_and_explain_jargon(
+                text=user_message, chat_id=group_id
+            )
+        except Exception as e:
+            logger.warning(f"[LLM Hook] 注入黑话理解失败: {e}")
+            return None
+
+    @monitored
+    async def _fetch_few_shots(self, group_id: str) -> Optional[str]:
+        """Fetch approved few-shot dialogue content for the given group."""
+        if not self._db_manager:
+            return None
+        try:
+            contents = await self._db_manager.get_approved_few_shots(group_id, limit=3)
+            if contents:
+                return contents[0]
+        except Exception as e:
+            logger.warning(f"[LLM Hook] Failed to fetch approved few-shots: {e}")
+        return None
+
+    @monitored
+    async def _fetch_shadow(self, group_id: str) -> Optional[str]:
+        if not self._shadow_mode_service:
+            return None
+        try:
+            return await self._shadow_mode_service.build_prompt(group_id)
+        except Exception as exc:
+            logger.warning(f"[LLM Hook] 获取影子模式档案失败: {exc}")
+            return None
+
+    # Result collectors
+
+    @staticmethod
+    def _collect_social(
+        result: Optional[str], group_id: str, out: List[str]
+    ) -> None:
+        if result:
+            out.append(result)
+            logger.debug(f"[LLM Hook] 已准备完整社交上下文 (长度: {len(result)})")
+        else:
+            logger.debug(f"[LLM Hook] 群组 {group_id} 暂无社交上下文")
+
+    @staticmethod
+    def _normalize_related_memories(memories: Any, limit: int = 5) -> List[str]:
+        """Return displayable memories in deterministic order for injection.
+
+        Memory engines may return plain strings or metadata dictionaries. Dict
+        entries are ordered by explicit relevance/time/id fields when present;
+        plain strings preserve provider order to avoid discarding reranker
+        relevance. Duplicates and blank entries are removed before limiting.
+        """
+        if not memories:
+            return []
+
+        def _text(entry: Any) -> str:
+            if isinstance(entry, str):
+                return entry.strip()
+            if isinstance(entry, dict):
+                for key in ("memory", "text", "content", "value"):
+                    value = entry.get(key)
+                    if value:
+                        return str(value).strip()
+            return ""
+
+        def _first_present(entry: Dict[str, Any], keys: tuple[str, ...]) -> Any:
+            for key in keys:
+                if key in entry:
+                    return entry.get(key)
+            return None
+
+        def _number(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _timestamp(value: Any) -> float:
+            if isinstance(value, str):
+                normalized = value.strip()
+                if normalized.endswith("Z"):
+                    normalized = f"{normalized[:-1]}+00:00"
+                try:
+                    return datetime.fromisoformat(normalized).timestamp()
+                except ValueError:
+                    pass
+            return _number(value)
+
+        entries: List[tuple[Any, int, str]] = []
+        seen: set[str] = set()
+        for index, entry in enumerate(memories):
+            text = _text(entry)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            entries.append((entry, index, text))
+
+        if any(isinstance(entry, dict) for entry, _, _ in entries):
+            def _sort_key(item: tuple[Any, int, str]) -> tuple[float, float, str, int, str]:
+                entry, index, text = item
+                if not isinstance(entry, dict):
+                    return (0.0, 0.0, "", index, text)
+                score = _number(
+                    _first_present(
+                        entry,
+                        ("score", "relevance", "similarity", "rank_score"),
+                    ),
+                    default=float("-inf"),
+                )
+                timestamp = _timestamp(
+                    _first_present(
+                        entry,
+                        ("created_at", "timestamp", "updated_at"),
+                    )
+                )
+                identifier = str(_first_present(entry, ("id", "memory_id")) or "")
+                return (-score, -timestamp, identifier, index, text)
+
+            entries.sort(key=_sort_key)
+
+        return [text for _, _, text in entries[:limit]]
+
+    @staticmethod
+    def _collect_v2(
+        result: Optional[Dict[str, Any]], ms: float, out: List[str]
+    ) -> None:
+        if not result:
+            return
+        v2_parts: List[str] = []
+        if result.get("knowledge_context"):
+            v2_parts.append(f"[Related Knowledge]\n{result['knowledge_context']}")
+        if result.get("related_memories"):
+            memories = LLMHookHandler._normalize_related_memories(
+                result["related_memories"],
+                limit=5,
+            )
+            if memories:
+                memories_text = "\n".join(memories)
+                v2_parts.append(f"[Related Memories]\n{memories_text}")
+        if result.get("few_shot_examples"):
+            examples_text = "\n".join(result["few_shot_examples"][:3])
+            v2_parts.append(f"[Style Examples]\n{examples_text}")
+        if v2_parts:
+            out.append("\n\n".join(v2_parts))
+            logger.debug(f"[LLM Hook] V2 context injected ({len(v2_parts)} sections, {ms:.0f}ms)")
+        else:
+            logger.debug(f"[LLM Hook] V2 context empty ({ms:.0f}ms)")
+
+    @staticmethod
+    def _collect_diversity(result: Optional[str], out: List[str]) -> None:
+        if result:
+            out.append(result)
+            logger.debug(f"[LLM Hook] 已准备多样性增强内容 (长度: {len(result)})")
+
+    @staticmethod
+    def _collect_jargon(result: Optional[str], out: List[str]) -> None:
+        if result:
+            out.append(
+                "[Jargon Comprehension Context]\n"
+                "以下黑话解释只用于理解用户当前消息。回复时不要主动复读、"
+                "模仿、扩散这些黑话，也不要把解释原样输出；仅在用户明确询问含义时才说明。\n"
+                f"{result}"
+            )
+            logger.debug(f"[LLM Hook] 已准备黑话理解内容 (长度: {len(result)})")
+        else:
+            logger.debug("[LLM Hook] 用户消息中未检测到已知黑话")
+
+    @staticmethod
+    def _collect_few_shots(result: Optional[str], out: List[str]) -> None:
+        if result:
+            out.append(f"[Few-Shot Dialogue Examples]\n{result}")
+            logger.debug(f"[LLM Hook] Few-shot dialogue injected (len={len(result)})")
+        else:
+            logger.debug("[LLM Hook] No approved few-shot dialogues available")
+
+    @staticmethod
+    def _collect_shadow(result: Optional[str], out: List[str]) -> None:
+        if result:
+            out.append(result)
+            logger.debug(f"[LLM Hook] 已准备影子模式档案 (长度: {len(result)})")
+
+    def _collect_session_updates(
+        self, group_id: str, out: List[str]
+    ) -> None:
+        if not self._temporary_persona_updater:
+            logger.debug("[LLM Hook] temporary_persona_updater未初始化，跳过会话级更新注入")
+            return
+        try:
+            session_updates = self._temporary_persona_updater.session_updates.get(
+                group_id, []
+            )
+            if session_updates:
+                updates_text = "\n\n".join(session_updates)
+                out.append(updates_text)
+                logger.debug(
+                    f"[LLM Hook] 已准备会话级更新 "
+                    f"(会话: {group_id}, 更新数: {len(session_updates)}, "
+                    f"长度: {len(updates_text)})"
+                )
+            else:
+                logger.debug(f"[LLM Hook] 会话 {group_id} 暂无增量更新")
+        except Exception as e:
+            logger.warning(f"[LLM Hook] 注入会话级更新失败: {e}")
+
+    # Injection
+
+    def _inject(
+        self, req: Any, injections: List[str], hook_start: float
+    ) -> None:
+        injection_text = "\n\n".join(injections)
+        context_text = f"<context>\n{injection_text}\n</context>"
+        target = getattr(
+            self._config,
+            "llm_hook_injection_target",
+            CACHE_FRIENDLY_LLM_HOOK_TARGET,
+        )
+
+        # Use AstrBot's extra_user_content_parts API to inject context.
+        # This keeps system_prompt stable for LLM API prefix caching,
+        # while appending dynamic context as extra content blocks after
+        # the user message.
+        if self._append_extra_user_content(req, context_text):
+            logger.debug(
+                f"[LLM Hook] extra_user_content_parts 注入完成 - "
+                f"新增: {len(injection_text)} chars, target={target}"
+            )
+        else:
+            self._legacy_inject(req, injection_text, target)
+
+        current_style = self._diversity_manager.get_current_style()
+        current_pattern = self._diversity_manager.get_current_pattern()
+        logger.debug(
+            f"[LLM Hook] 当前语言风格: {current_style}, 回复模式: {current_pattern}"
+        )
+        logger.debug(
+            f"[LLM Hook] 注入内容数量: {len(injections)}项, "
+            f"耗时: {time.time() - hook_start:.3f}s"
+        )
+        logger.debug(f"[LLM Hook] 注入内容预览: {injection_text[:200]}...")
+
+    @staticmethod
+    def _append_extra_user_content(req: Any, context_text: str) -> bool:
+        """Append dynamic context as a temporary AstrBot content part when possible."""
+        content_parts = getattr(req, "extra_user_content_parts", None)
+        if (
+            TextPart is None
+            or content_parts is None
+            or not hasattr(content_parts, "append")
+        ):
+            return False
+
+        part = TextPart(text=context_text)
+        mark_as_temp = getattr(part, "mark_as_temp", None)
+        if callable(mark_as_temp):
+            mark_as_temp()
+        content_parts.append(part)
+        return True
+
+    @staticmethod
+    def _legacy_inject(req: Any, injection_text: str, target: str) -> None:
+        """Fallback for old AstrBot versions without extra_user_content_parts."""
+        fallback_target = target if target in LEGACY_LLM_HOOK_TARGETS else "system_prompt"
+
+        if fallback_target == "prompt":
+            prompt = getattr(req, "prompt", "") or ""
+            req.prompt = f"{prompt}\n\n{injection_text}" if prompt else injection_text
+            logger.debug(
+                f"[LLM Hook] prompt fallback 注入完成 - "
+                f"新增: {len(injection_text)} chars"
+            )
+            logger.warning(
+                "[LLM Hook] 当前 AstrBot 版本不支持 extra_user_content_parts，"
+                "回退到 prompt 注入（可能膨胀对话历史并降低缓存命中率）"
+            )
+            return
+
+        system_prompt = getattr(req, "system_prompt", "") or ""
+        req.system_prompt = (
+            f"{system_prompt}\n\n{injection_text}"
+            if system_prompt
+            else injection_text
+        )
+        logger.debug(
+            f"[LLM Hook] system_prompt fallback 注入完成 - "
+            f"新增: {len(injection_text)} chars"
+        )
+        logger.warning(
+            "[LLM Hook] 当前 AstrBot 版本不支持 extra_user_content_parts，"
+            "回退到 system_prompt 注入（会影响缓存命中率）"
+        )

@@ -1,0 +1,653 @@
+"""
+AstrBot 框架 LLM 适配器
+用于替换自定义 LLMClient，直接使用 AstrBot 框架的 Provider 系统
+"""
+import asyncio
+import hashlib
+import time
+from typing import Optional, List, Dict, Any, Tuple
+from astrbot.api import logger
+from astrbot.core.provider.provider import Provider
+from astrbot.core.provider.entities import LLMResponse
+
+class FrameworkLLMAdapter:
+    """AstrBot框架LLM适配器，用于替换自定义LLMClient"""
+    
+    def __init__(self, context):
+        self.context = context
+        self.filter_provider: Optional[Provider] = None
+        self.refine_provider: Optional[Provider] = None
+        self.reinforce_provider: Optional[Provider] = None
+        self.providers_configured = 0
+        self._needs_lazy_init = False
+        self._config = None
+        # 延迟初始化冷却: 避免在providers尚未就绪时高频重试
+        self._last_lazy_init_attempt: float = 0
+        self._lazy_init_cooldown: float = 30.0
+        self._filter_cache_ttl: float = 60.0
+        self._filter_cache_max_size: int = 256
+        self._filter_cache: Dict[str, Tuple[float, Optional[str]]] = {}
+        self._filter_inflight: Dict[str, asyncio.Task] = {}
+
+        # 添加调用统计
+        self.call_stats = {
+            'filter': {'total_calls': 0, 'total_time': 0, 'errors': 0},
+            'refine': {'total_calls': 0, 'total_time': 0, 'errors': 0},
+            'reinforce': {'total_calls': 0, 'total_time': 0, 'errors': 0},
+            'general': {'total_calls': 0, 'total_time': 0, 'errors': 0}
+        }
+        
+    def initialize_providers(self, config):
+        """根据配置初始化Provider"""
+        from astrbot.core.provider.entities import ProviderType
+
+        # 保存配置用于可能的延迟初始化
+        self._config = config
+        self.providers_configured = 0
+        self.filter_provider = None
+        self.refine_provider = None
+        self.reinforce_provider = None
+
+        # 添加配置调试日志
+        logger.info(f" [LLM适配器] 开始初始化Provider，配置信息：")
+        logger.info(f" - filter_provider_id: {config.filter_provider_id}")
+        logger.info(f" - refine_provider_id: {config.refine_provider_id}")
+        logger.info(f" - reinforce_provider_id: {config.reinforce_provider_id}")
+
+        # 获取所有可用的Provider列表作为备选
+        available_providers = []
+        try:
+            # 使用 get_all_providers() 方法获取所有 CHAT_COMPLETION 类型的 Provider
+            all_providers = self.context.get_all_providers()
+            logger.info(f" - 发现 {len(all_providers)} 个 Provider")
+
+            for provider in all_providers:
+                provider_meta = provider.meta()
+                if provider_meta.provider_type == ProviderType.CHAT_COMPLETION:
+                    available_providers.append(provider)
+                    logger.debug(f" Provider {provider_meta.id} 可用 (类型: {provider_meta.provider_type.value})")
+
+            logger.info(f" 发现 {len(available_providers)} 个可用的 CHAT_COMPLETION 类型 Provider")
+        except Exception as e:
+            logger.warning(f"获取可用Provider列表失败: {e}")
+
+        has_configured_provider_ids = bool(
+            config.filter_provider_id or config.refine_provider_id or config.reinforce_provider_id
+        )
+        provider_registry_ready = len(available_providers) > 0
+
+        # 启动早期常见场景：Provider 注册表尚未准备完成。
+        # 此时直接返回，避免误报“配置错误”日志。
+        if not provider_registry_ready:
+            self._needs_lazy_init = True
+            if has_configured_provider_ids:
+                logger.warning(
+                    " [LLM适配器] Provider 注册表尚未就绪（当前 0 个），"
+                    "跳过本次绑定并等待延迟重试。"
+                )
+            else:
+                logger.warning(
+                    " [LLM适配器] 当前没有可用 Provider，且未配置 provider_id，"
+                    "稍后将重试初始化。"
+                )
+            return
+        
+        # 初始化筛选Provider
+        if config.filter_provider_id:
+            self.filter_provider = self.context.get_provider_by_id(config.filter_provider_id)
+            if not self.filter_provider:
+                logger.warning(f"找不到筛选Provider: {config.filter_provider_id}")
+                # 如果指定的Provider不存在，尝试使用第一个可用的Provider
+                if available_providers:
+                    self.filter_provider = available_providers[0]
+                    logger.info(f"自动分配筛选Provider: {self.filter_provider.meta().id}")
+            else:
+                # 检查Provider类型
+                provider_meta = self.filter_provider.meta()
+                if provider_meta.provider_type != ProviderType.CHAT_COMPLETION:
+                    logger.error(f"筛选Provider类型错误: {config.filter_provider_id} 是 {provider_meta.provider_type.value} 类型，需要 {ProviderType.CHAT_COMPLETION.value} 类型")
+                    self.filter_provider = None
+                    # 尝试使用备选Provider
+                    if available_providers:
+                        self.filter_provider = available_providers[0]
+                        logger.info(f"自动分配筛选Provider: {self.filter_provider.meta().id}")
+                else:
+                    logger.info(f"筛选Provider已配置: {config.filter_provider_id}")
+                    
+        if self.filter_provider:
+            self.providers_configured += 1
+                
+        # 初始化提炼Provider
+        if config.refine_provider_id:
+            self.refine_provider = self.context.get_provider_by_id(config.refine_provider_id)
+            if not self.refine_provider:
+                logger.warning(f"找不到提炼Provider: {config.refine_provider_id}")
+                # 如果指定的Provider不存在，尝试使用可用的Provider（避免与filter重复）
+                for provider in available_providers:
+                    if provider != self.filter_provider:
+                        self.refine_provider = provider
+                        logger.info(f"自动分配提炼Provider: {self.refine_provider.meta().id}")
+                        break
+                if not self.refine_provider and available_providers:
+                    # 如果没有其他Provider，也可以复用filter_provider
+                    self.refine_provider = available_providers[0]
+                    logger.info(f"复用筛选Provider作为提炼Provider: {self.refine_provider.meta().id}")
+            else:
+                # 检查Provider类型
+                provider_meta = self.refine_provider.meta()
+                if provider_meta.provider_type != ProviderType.CHAT_COMPLETION:
+                    logger.error(f"提炼Provider类型错误: {config.refine_provider_id} 是 {provider_meta.provider_type.value} 类型，需要 {ProviderType.CHAT_COMPLETION.value} 类型")
+                    self.refine_provider = None
+                    # 尝试使用备选Provider
+                    for provider in available_providers:
+                        if provider != self.filter_provider:
+                            self.refine_provider = provider
+                            logger.info(f"自动分配提炼Provider: {self.refine_provider.meta().id}")
+                            break
+                else:
+                    logger.info(f"提炼Provider已配置: {config.refine_provider_id}")
+                    
+        if self.refine_provider:
+            self.providers_configured += 1
+                
+        # 初始化强化Provider
+        if config.reinforce_provider_id:
+            self.reinforce_provider = self.context.get_provider_by_id(config.reinforce_provider_id)
+            if not self.reinforce_provider:
+                logger.warning(f"找不到强化Provider: {config.reinforce_provider_id}")
+                # 如果指定的Provider不存在，尝试使用可用的Provider（避免与已有重复）
+                for provider in available_providers:
+                    if provider != self.filter_provider and provider != self.refine_provider:
+                        self.reinforce_provider = provider
+                        logger.info(f"自动分配强化Provider: {self.reinforce_provider.meta().id}")
+                        break
+                if not self.reinforce_provider and available_providers:
+                    # 如果没有其他Provider，也可以复用已有Provider
+                    self.reinforce_provider = available_providers[0]
+                    logger.info(f"复用Provider作为强化Provider: {self.reinforce_provider.meta().id}")
+            else:
+                # 检查Provider类型
+                provider_meta = self.reinforce_provider.meta()
+                if provider_meta.provider_type != ProviderType.CHAT_COMPLETION:
+                    logger.error(f"强化Provider类型错误: {config.reinforce_provider_id} 是 {provider_meta.provider_type.value} 类型，需要 {ProviderType.CHAT_COMPLETION.value} 类型")
+                    self.reinforce_provider = None
+                    # 尝试使用备选Provider
+                    for provider in available_providers:
+                        if provider != self.filter_provider and provider != self.refine_provider:
+                            self.reinforce_provider = provider
+                            logger.info(f"自动分配强化Provider: {self.reinforce_provider.meta().id}")
+                            break
+                else:
+                    logger.info(f"强化Provider已配置: {config.reinforce_provider_id}")
+                    
+        if self.reinforce_provider:
+            self.providers_configured += 1
+        
+        # 如果配置文件中没有指定任何Provider，尝试自动配置第一个可用的Provider到所有角色
+        if self.providers_configured == 0 and available_providers:
+            logger.warning("配置文件中未指定任何Provider，尝试自动配置...")
+            first_provider = available_providers[0]
+            self.filter_provider = first_provider
+            self.refine_provider = first_provider
+            self.reinforce_provider = first_provider
+            self.providers_configured = 3
+            logger.info(f"已自动配置Provider到所有角色: {first_provider.meta().id}")
+        
+        # 友好的配置状态提示
+        if self.providers_configured == 0:
+            logger.error(" 没有可用的AI模型Provider。请在AstrBot中配置至少一个CHAT_COMPLETION类型的Provider，并在插件配置中指定Provider ID。")
+        elif self.providers_configured < 3:
+            logger.info(f" 已配置 {self.providers_configured}/3 个AI模型Provider。部分高级功能可能使用简化算法。")
+        else:
+            logger.info(f" 已成功配置所有 {self.providers_configured} 个AI模型Provider！")
+
+        if self.providers_configured > 0:
+            self._needs_lazy_init = False
+            
+        # 显示最终配置结果
+        config_summary = []
+        if self.filter_provider:
+            config_summary.append(f"筛选: {self.filter_provider.meta().id}")
+        if self.refine_provider:
+            config_summary.append(f"提炼: {self.refine_provider.meta().id}")
+        if self.reinforce_provider:
+            config_summary.append(f"强化: {self.reinforce_provider.meta().id}")
+        
+        if config_summary:
+            logger.info(f" Provider配置摘要: {' | '.join(config_summary)}")
+        else:
+            logger.warning(" 所有Provider均未配置，插件功能将受限")
+
+    def _try_lazy_init(self):
+        """尝试延迟初始化Provider（带30秒冷却间隔，避免高频重试开销）"""
+        if not self._needs_lazy_init or not self._config:
+            return
+        now = time.time()
+        if now - self._last_lazy_init_attempt < self._lazy_init_cooldown:
+            return
+        self._last_lazy_init_attempt = now
+        logger.info("[LLM适配器] 尝试延迟初始化Provider...")
+        try:
+            self.initialize_providers(self._config)
+            if self.providers_configured > 0:
+                self._needs_lazy_init = False
+                logger.info(f"[LLM适配器] 延迟初始化成功，已配置 {self.providers_configured} 个Provider")
+            else:
+                logger.warning("[LLM适配器] 延迟初始化仍未找到可用Provider")
+        except Exception as e:
+            logger.warning(f"[LLM适配器] 延迟初始化失败: {e}")
+
+    @staticmethod
+    def _looks_like_stale_provider_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        stale_markers = (
+            "404",
+            "model is not found",
+            "model not found",
+            "model does not exist",
+            "model_not_found",
+            "not found",
+            "模型不存在",
+            "找不到模型",
+        )
+        return any(marker in message for marker in stale_markers)
+
+    def _refresh_provider_bindings_after_error(self, role_label: str, exc: Exception) -> bool:
+        """Rebind providers once when a call likely used stale model/provider state."""
+        if not self._config or not self._looks_like_stale_provider_error(exc):
+            return False
+
+        logger.warning(
+            f"[LLM适配器] {role_label}Provider 调用疑似使用了过期模型配置，"
+            f"将重新绑定 Provider 后重试一次: {exc}"
+        )
+        try:
+            self.initialize_providers(self._config)
+            self._filter_cache.clear()
+            return self.providers_configured > 0
+        except Exception as refresh_error:
+            logger.warning(
+                f"[LLM适配器] {role_label}Provider 重新绑定失败: {refresh_error}",
+                exc_info=True,
+            )
+            return False
+
+    async def _text_chat_with_rebind_retry(
+        self,
+        provider_attr: str,
+        role_label: str,
+        prompt: str,
+        contexts: List[Dict[str, str]],
+        system_prompt: Optional[str],
+        **kwargs,
+    ) -> Optional[LLMResponse]:
+        provider = getattr(self, provider_attr)
+        if not provider:
+            return None
+
+        logger.debug(f"调用{role_label}Provider: {provider.meta().id}")
+        try:
+            return await provider.text_chat(
+                prompt=prompt,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
+        except Exception as exc:
+            if not self._refresh_provider_bindings_after_error(role_label, exc):
+                raise
+
+            retry_provider = getattr(self, provider_attr)
+            if not retry_provider or retry_provider is provider:
+                raise
+
+            logger.info(
+                f"[LLM适配器] {role_label}Provider 已重新绑定: "
+                f"{retry_provider.meta().id}"
+            )
+            return await retry_provider.text_chat(
+                prompt=prompt,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
+
+    @staticmethod
+    def _filter_cache_key(
+        prompt: str,
+        contexts: Optional[List[Dict[str, str]]],
+        system_prompt: Optional[str],
+        kwargs: Dict[str, Any],
+    ) -> str:
+        key_payload = {
+            "prompt": prompt or "",
+            "contexts": contexts or [],
+            "system_prompt": system_prompt or "",
+            "kwargs": {
+                key: value
+                for key, value in sorted(kwargs.items())
+                if key not in {"stream", "timeout"}
+            },
+        }
+        return hashlib.sha256(repr(key_payload).encode("utf-8", errors="ignore")).hexdigest()
+
+    def _get_filter_cache(self, key: str) -> Optional[str]:
+        item = self._filter_cache.get(key)
+        if not item:
+            return None
+        created_at, value = item
+        if time.time() - created_at > self._filter_cache_ttl:
+            self._filter_cache.pop(key, None)
+            return None
+        return value
+
+    def _set_filter_cache(self, key: str, value: Optional[str]) -> None:
+        if len(self._filter_cache) >= self._filter_cache_max_size:
+            oldest_key = min(
+                self._filter_cache,
+                key=lambda item: self._filter_cache[item][0],
+            )
+            self._filter_cache.pop(oldest_key, None)
+        self._filter_cache[key] = (time.time(), value)
+
+    async def _call_filter_provider(
+        self,
+        prompt: str,
+        contexts: List[Dict[str, str]],
+        system_prompt: Optional[str],
+        **kwargs,
+    ) -> Optional[str]:
+        start_time = time.time()
+        self.call_stats['filter']['total_calls'] += 1
+
+        try:
+            response = await self._text_chat_with_rebind_retry(
+                "filter_provider",
+                "筛选",
+                prompt=prompt,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
+            return response.completion_text if response else None
+        except Exception as e:
+            self.call_stats['filter']['errors'] += 1
+            logger.error(f"筛选模型调用失败: {e}")
+            return None
+        finally:
+            elapsed_time = time.time() - start_time
+            self.call_stats['filter']['total_time'] += elapsed_time
+
+    async def filter_chat_completion(
+        self,
+        prompt: str,
+        contexts: Optional[List[Dict[str, str]]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs
+    ) -> Optional[str]:
+        """使用筛选模型进行对话补全"""
+        # 尝试延迟初始化
+        self._try_lazy_init()
+
+        # 确保 contexts 不为 None，避免 Provider 内部调用 len(None)
+        if contexts is None:
+            contexts = []
+
+        if not self.filter_provider:
+            logger.warning("筛选Provider未配置，尝试使用备选Provider或降级处理")
+            # 尝试使用其他可用的Provider作为备选
+            fallback_provider = self.refine_provider or self.reinforce_provider
+            if fallback_provider:
+                logger.info(f"使用备选Provider: {fallback_provider.meta().id}")
+                try:
+                    response = await fallback_provider.text_chat(
+                        prompt=prompt,
+                        contexts=contexts,
+                        system_prompt=system_prompt,
+                        **kwargs
+                    )
+                    return response.completion_text if response else None
+                except Exception as e:
+                    logger.error(f"备选Provider调用失败: {e}")
+                    return None
+            else:
+                logger.error("没有可用的Provider，无法执行筛选任务")
+                return None
+            
+        cache_key = self._filter_cache_key(prompt, contexts, system_prompt, kwargs)
+        cached_response = self._get_filter_cache(cache_key)
+        if cached_response is not None:
+            logger.debug("筛选模型命中短期缓存，跳过重复调用")
+            return cached_response
+
+        inflight = self._filter_inflight.get(cache_key)
+        if inflight and not inflight.done():
+            logger.debug("筛选模型已有相同请求进行中，复用结果")
+            return await inflight
+
+        task = asyncio.create_task(
+            self._call_filter_provider(prompt, contexts, system_prompt, **kwargs)
+        )
+        self._filter_inflight[cache_key] = task
+        try:
+            result = await task
+            self._set_filter_cache(cache_key, result)
+            return result
+        finally:
+            self._filter_inflight.pop(cache_key, None)
+    
+    async def refine_chat_completion(
+        self,
+        prompt: str,
+        contexts: Optional[List[Dict[str, str]]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs
+    ) -> Optional[str]:
+        """使用提炼模型进行对话补全"""
+        # 尝试延迟初始化
+        self._try_lazy_init()
+
+        # 确保 contexts 不为 None，避免 Provider 内部调用 len(None)
+        if contexts is None:
+            contexts = []
+
+        if not self.refine_provider:
+            logger.warning("提炼Provider未配置，尝试使用备选Provider或降级处理")
+            # 尝试使用其他可用的Provider作为备选
+            fallback_provider = self.filter_provider or self.reinforce_provider
+            if fallback_provider:
+                logger.info(f"使用备选Provider: {fallback_provider.meta().id}")
+                try:
+                    response = await fallback_provider.text_chat(
+                        prompt=prompt,
+                        contexts=contexts,
+                        system_prompt=system_prompt,
+                        **kwargs
+                    )
+                    return response.completion_text if response else None
+                except Exception as e:
+                    logger.error(f"备选Provider调用失败: {e}")
+                    return None
+            else:
+                logger.error("没有可用的Provider，无法执行提炼任务")
+                return None
+            
+        try:
+            start_time = time.time()
+            self.call_stats['refine']['total_calls'] += 1
+            
+            response = await self._text_chat_with_rebind_retry(
+                "refine_provider",
+                "提炼",
+                prompt=prompt,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
+            
+            # 统计调用时间
+            elapsed_time = time.time() - start_time
+            self.call_stats['refine']['total_time'] += elapsed_time
+            
+            return response.completion_text if response else None
+        except Exception as e:
+            # 统计错误
+            elapsed_time = time.time() - start_time
+            self.call_stats['refine']['total_time'] += elapsed_time
+            self.call_stats['refine']['errors'] += 1
+            
+            logger.error(f"提炼模型调用失败: {e}")
+            return None
+    
+    async def reinforce_chat_completion(
+        self,
+        prompt: str,
+        contexts: Optional[List[Dict[str, str]]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs
+    ) -> Optional[str]:
+        """使用强化模型进行对话补全"""
+        # 尝试延迟初始化
+        self._try_lazy_init()
+
+        # 确保 contexts 不为 None，避免 Provider 内部调用 len(None)
+        if contexts is None:
+            contexts = []
+
+        if not self.reinforce_provider:
+            logger.warning("强化Provider未配置，尝试使用备选Provider或降级处理")
+            # 尝试使用其他可用的Provider作为备选
+            fallback_provider = self.refine_provider or self.filter_provider
+            if fallback_provider:
+                logger.info(f"使用备选Provider: {fallback_provider.meta().id}")
+                try:
+                    response = await fallback_provider.text_chat(
+                        prompt=prompt,
+                        contexts=contexts,
+                        system_prompt=system_prompt,
+                        **kwargs
+                    )
+                    return response.completion_text if response else None
+                except Exception as e:
+                    logger.error(f"备选Provider调用失败: {e}")
+                    return None
+            else:
+                logger.error("没有可用的Provider，无法执行强化任务")
+                return None
+            
+        try:
+            start_time = time.time()
+            self.call_stats['reinforce']['total_calls'] += 1
+            
+            response = await self._text_chat_with_rebind_retry(
+                "reinforce_provider",
+                "强化",
+                prompt=prompt,
+                contexts=contexts,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
+            
+            # 统计调用时间
+            elapsed_time = time.time() - start_time
+            self.call_stats['reinforce']['total_time'] += elapsed_time
+            
+            return response.completion_text if response else None
+        except Exception as e:
+            # 统计错误
+            elapsed_time = time.time() - start_time
+            self.call_stats['reinforce']['total_time'] += elapsed_time
+            self.call_stats['reinforce']['errors'] += 1
+            
+            logger.error(f"强化模型调用失败: {e}")
+            return None
+
+    def get_call_statistics(self) -> Dict[str, Any]:
+        """获取调用统计信息"""
+        stats = {}
+        total_calls = 0
+        total_time = 0
+        total_errors = 0
+        
+        for provider_type, data in self.call_stats.items():
+            calls = data['total_calls']
+            time_spent = data['total_time']
+            errors = data['errors']
+            
+            total_calls += calls
+            total_time += time_spent
+            total_errors += errors
+            
+            avg_time = (time_spent / calls * 1000) if calls > 0 else 0
+            success_rate = ((calls - errors) / calls) if calls > 0 else 1.0
+            
+            stats[provider_type] = {
+                'total_calls': calls,
+                'avg_response_time_ms': round(avg_time, 2),
+                'success_rate': success_rate,
+                'error_count': errors
+            }
+        
+        # 添加总体统计
+        overall_avg_time = (total_time / total_calls * 1000) if total_calls > 0 else 0
+        overall_success_rate = ((total_calls - total_errors) / total_calls) if total_calls > 0 else 1.0
+        
+        stats['overall'] = {
+            'total_calls': total_calls,
+            'avg_response_time_ms': round(overall_avg_time, 2),
+            'success_rate': overall_success_rate,
+            'error_count': total_errors
+        }
+        
+        return stats
+
+    def has_filter_provider(self) -> bool:
+        """检查是否有筛选Provider"""
+        return self.filter_provider is not None
+    
+    def has_refine_provider(self) -> bool:
+        """检查是否有提炼Provider"""
+        return self.refine_provider is not None
+    
+    def has_reinforce_provider(self) -> bool:
+        """检查是否有强化Provider"""
+        return self.reinforce_provider is not None
+
+    def get_provider_info(self) -> Dict[str, str]:
+        """获取Provider信息"""
+        info = {}
+        if self.filter_provider:
+            info['filter'] = f"{self.filter_provider.meta().id} ({self.filter_provider.meta().model})"
+        if self.refine_provider:
+            info['refine'] = f"{self.refine_provider.meta().id} ({self.refine_provider.meta().model})"
+        if self.reinforce_provider:
+            info['reinforce'] = f"{self.reinforce_provider.meta().id} ({self.reinforce_provider.meta().model})"
+        return info
+
+    async def generate_response(self, prompt: str, temperature: float = 0.7, model_type: str = "filter") -> Optional[str]:
+        """
+        通用的生成响应方法，根据model_type调用对应的Provider
+
+        Args:
+            prompt: 提示词
+            temperature: 温度参数
+            model_type: 模型类型 ("filter", "refine", "reinforce", "general")
+
+        Returns:
+            LLM响应文本，如果失败返回None
+        """
+        try:
+            if model_type == "filter":
+                return await self.filter_chat_completion(prompt=prompt, temperature=temperature)
+            elif model_type == "refine":
+                return await self.refine_chat_completion(prompt=prompt, temperature=temperature)
+            elif model_type == "reinforce":
+                return await self.reinforce_chat_completion(prompt=prompt, temperature=temperature)
+            elif model_type == "general":
+                return await self.filter_chat_completion(prompt=prompt, temperature=temperature)
+            else:
+                logger.error(f"不支持的模型类型: {model_type}")
+                return None
+        except Exception as e:
+            logger.error(f"generate_response调用失败: {e}")
+            return None

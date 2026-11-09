@@ -1,0 +1,1943 @@
+"""
+配置服务 - 处理插件配置相关业务逻辑
+"""
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import os
+import importlib
+from collections.abc import MutableMapping
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import aiohttp
+from astrbot.api import logger
+from pydantic import ValidationError
+
+from .auth_service import (
+    AuthService,
+    INITIAL_WEBUI_PASSWORD_ENV_VAR,
+    validate_password_strength,
+)
+
+try:
+    from ...config import get_config_cost_warnings
+    from ...statics.messages import FileNames
+    from ...utils.logging_utils import apply_astrbot_log_level
+except ImportError:
+    from config import get_config_cost_warnings
+    from statics.messages import FileNames
+    from utils.logging_utils import apply_astrbot_log_level
+
+
+@lru_cache(maxsize=1)
+def _load_schema_definition() -> Dict[str, Any]:
+    """Load the editable config schema from the repository root."""
+    schema_path = Path(__file__).resolve().parents[2] / "_conf_schema.json"
+    with open(schema_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+_EXTRA_SCHEMA_DEFINITION: Dict[str, Dict[str, Any]] = {
+    "Filter_Parameters": {
+        "items": {
+            "relevance_threshold": {
+                "description": "相关性阈值",
+                "type": "float",
+                "hint": "消息与学习目标的相关性阈值，0-1之间，越高越严格",
+                "default": 0.6,
+            },
+        },
+    },
+    "MaiBot_Enhancement": {
+        "description": "MaiBot 增强",
+        "hint": "启用表达模式、记忆图和知识图谱等扩展能力",
+        "items": {
+            "enable_maibot_features": {
+                "description": "启用 MaiBot 增强功能",
+                "type": "bool",
+                "hint": "开启后会启用 MaiBot 风格的扩展功能总开关",
+                "default": True,
+            },
+            "enable_expression_patterns": {
+                "description": "启用表达模式学习",
+                "type": "bool",
+                "hint": "学习并维护群聊中的表达模式和常见句式",
+                "default": True,
+            },
+            "enable_expression_user_scope": {
+                "description": "表达模式按用户个性化",
+                "type": "bool",
+                "hint": "开启后表达模式会按 sender_id 建立可选 user_id 维度；默认关闭以保持旧的群组/人格级学习与缓存行为",
+                "default": False,
+            },
+            "enable_realtime_expression_learning": {
+                "description": "实时表达方式学习",
+                "type": "bool",
+                "hint": "实时学习关闭时，是否仍按消息增量触发表达方式学习。默认关闭以避免旁听群聊时产生高频 LLM 调用和审查记录",
+                "default": False,
+            },
+            "enable_memory_graph": {
+                "description": "启用记忆图系统",
+                "type": "bool",
+                "hint": "开启记忆关系图与关联记忆能力",
+                "default": True,
+            },
+            "enable_knowledge_graph": {
+                "description": "启用知识图谱",
+                "type": "bool",
+                "hint": "开启知识关系图谱与实体关联增强",
+                "default": True,
+            },
+            "enable_time_decay": {
+                "description": "启用时间衰减",
+                "type": "bool",
+                "hint": "让旧数据随时间自动弱化权重",
+                "default": True,
+            },
+        },
+    },
+    "Persona_Evolution_Settings": {
+        "description": "人格演化",
+        "hint": "控制人格合并、自动应用和更新备份",
+        "items": {
+            "persona_merge_strategy": {
+                "description": "人格合并策略",
+                "type": "string",
+                "hint": "控制人格更新时的合并方式",
+                "default": "smart",
+                "options": [
+                    {"value": "replace", "label": "替换"},
+                    {"value": "append", "label": "追加"},
+                    {"value": "prepend", "label": "前置"},
+                    {"value": "smart", "label": "智能"},
+                ],
+            },
+            "max_mood_imitation_dialogs": {
+                "description": "最大对话风格模仿数量",
+                "type": "int",
+                "hint": "单次模仿训练最多处理的对话轮数",
+                "default": 20,
+            },
+            "enable_persona_evolution": {
+                "description": "启用人格演化跟踪",
+                "type": "bool",
+                "hint": "开启后会记录人格变化轨迹并参与后续更新",
+                "default": True,
+            },
+            "persona_compatibility_threshold": {
+                "description": "人格兼容性阈值",
+                "type": "float",
+                "hint": "用于判断更新内容是否与当前人格兼容",
+                "default": 0.6,
+            },
+            "use_persona_manager_updates": {
+                "description": "使用 PersonaManager 更新",
+                "type": "bool",
+                "hint": "开启后优先通过 PersonaManager 进行人格更新",
+                "default": True,
+            },
+            "auto_apply_persona_updates": {
+                "description": "自动应用人格更新",
+                "type": "bool",
+                "hint": "仅在 PersonaManager 更新模式下生效",
+                "default": True,
+            },
+            "persona_update_backup_enabled": {
+                "description": "启用人格更新备份",
+                "type": "bool",
+                "hint": "更新前自动创建备份，降低误操作风险",
+                "default": True,
+            },
+        },
+    },
+    "Runtime_Internal_Settings": {
+        "description": "运行与内部",
+        "hint": "运行时注入、内存清理和内部路径",
+        "items": {
+            "llm_hook_injection_target": {
+                "description": "LLM Hook 注入目标",
+                "type": "string",
+                "hint": (
+                    "推荐保持 extra_user_content_parts：动态上下文会追加到用户消息尾部"
+                    "并标记为临时内容，避免改动 system_prompt 影响 provider prefix cache。"
+                    "system_prompt/prompt 仅作为旧版 AstrBot fallback"
+                ),
+                "default": "extra_user_content_parts",
+                "options": [
+                    {
+                        "value": "extra_user_content_parts",
+                        "label": "extra_user_content_parts（推荐）",
+                    },
+                    {"value": "system_prompt", "label": "system_prompt（旧版 fallback）"},
+                    {"value": "prompt", "label": "prompt（旧版 fallback）"},
+                ],
+            },
+            "enable_llm_hooks": {
+                "description": "启用 LLM Hook 上下文注入",
+                "type": "bool",
+                "hint": "开启后每次回复前会并行拉取社交、记忆、黑话、few-shot 等上下文；默认关闭以避免高频模型调用",
+                "default": False,
+            },
+            "enable_command_pass_through": {
+                "description": "命令消息直接放行",
+                "type": "bool",
+                "hint": "开启后，以系统级命令前缀（/ ! # . 等）开头的命令消息会跳过 LLM Hook 上下文注入直接处理，避免功能命令响应被拉长",
+                "default": True,
+            },
+            "use_sqlalchemy": {
+                "description": "强制使用 SQLAlchemy ORM",
+                "type": "bool",
+                "hint": "当前版本固定为 true，用于统一 SQLite / MySQL / PostgreSQL 表结构",
+                "default": True,
+                "_readonly": True,
+            },
+            "enable_memory_cleanup": {
+                "description": "启用记忆自动清理",
+                "type": "bool",
+                "hint": "开启后会定期清理过旧或低重要度的记忆数据",
+                "default": True,
+            },
+            "memory_cleanup_days": {
+                "description": "记忆保留天数",
+                "type": "int",
+                "hint": "低于该天数阈值的旧记忆会被清理",
+                "default": 30,
+            },
+            "memory_importance_threshold": {
+                "description": "记忆重要性阈值",
+                "type": "float",
+                "hint": "0-1 浮点，低于该值的旧记忆会被清理；记忆按 0-10 整数存储，内部会换算（如 0.3 → 低于 3 的旧记忆被清理）",
+                "default": 0.3,
+            },
+            "shutdown_step_timeout": {
+                "description": "关停步骤超时",
+                "type": "int",
+                "hint": "每个关停步骤的最大等待时间（秒）",
+                "default": 8,
+            },
+            "task_cancel_timeout": {
+                "description": "任务取消超时",
+                "type": "int",
+                "hint": "后台任务取消时的等待超时（秒）",
+                "default": 3,
+            },
+            "service_stop_timeout": {
+                "description": "服务停止超时",
+                "type": "int",
+                "hint": "单个服务停止时的等待超时（秒）",
+                "default": 5,
+            },
+            "llm_hook_context_timeout": {
+                "description": "LLM Hook 上下文超时",
+                "type": "float",
+                "hint": "LLM Hook 读取单个上下文源的最大等待时间（秒）",
+                "default": 3.0,
+            },
+            "messages_db_path": {
+                "description": "消息数据库路径",
+                "type": "string",
+                "hint": "自动生成的消息数据库路径，通常无需修改",
+                "default": None,
+                "_readonly": True,
+            },
+            "learning_log_path": {
+                "description": "学习日志路径",
+                "type": "string",
+                "hint": "自动生成的学习日志路径，通常无需修改",
+                "default": None,
+                "_readonly": True,
+            },
+            "total_messages_collected": {
+                "description": "累计消息数",
+                "type": "int",
+                "hint": "当前运行周期内累计收集到的消息数量",
+                "default": 0,
+                "_readonly": True,
+            },
+        },
+    },
+}
+
+_ENUM_FIELD_OPTIONS: Dict[str, List[Dict[str, str]]] = {
+    "db_type": [
+        {"value": "postgresql", "label": "PostgreSQL"},
+        {"value": "sqlite", "label": "SQLite"},
+        {"value": "mysql", "label": "MySQL"},
+    ],
+    "knowledge_engine": [
+        {"value": "legacy", "label": "legacy"},
+        {"value": "lightrag", "label": "lightrag"},
+    ],
+    "memory_engine": [
+        {"value": "legacy", "label": "legacy"},
+        {"value": "mem0", "label": "mem0"},
+    ],
+    "lightrag_query_mode": [
+        {"value": "naive", "label": "naive"},
+        {"value": "local", "label": "local"},
+        {"value": "global", "label": "global"},
+        {"value": "hybrid", "label": "hybrid"},
+        {"value": "mix", "label": "mix"},
+    ],
+    "context_injection_position": [
+        {"value": "start", "label": "start"},
+        {"value": "end", "label": "end"},
+    ],
+    "log_level": [
+        {"value": "error", "label": "error"},
+        {"value": "warning", "label": "warning"},
+        {"value": "info", "label": "info"},
+        {"value": "debug", "label": "debug"},
+        {"value": "trace", "label": "trace"},
+    ],
+}
+
+_PROVIDER_TYPE_ALIASES = {
+    "chat": "chat_completion",
+    "llm": "chat_completion",
+    "chat_completion": "chat_completion",
+    "embedding": "embedding",
+    "embed": "embedding",
+    "rerank": "rerank",
+    "reranker": "rerank",
+}
+
+_PROVIDER_TYPE_LABELS = {
+    "chat_completion": "聊天模型",
+    "embedding": "Embedding",
+    "rerank": "Reranker",
+}
+
+_PROVIDER_MODELS_TIMEOUT_SECONDS = 3.0
+_PROVIDER_SCHEMA_TIMEOUT_SECONDS = 5.0
+_PROVIDER_OPTION_MODEL_PREVIEW_LIMIT = 3
+
+_RESTART_REQUIRED_KEYS = {
+    "data_dir",
+    "db_type",
+    "mysql_host",
+    "mysql_port",
+    "mysql_user",
+    "mysql_password",
+    "mysql_database",
+    "postgresql_host",
+    "postgresql_port",
+    "postgresql_user",
+    "postgresql_password",
+    "postgresql_database",
+    "postgresql_schema",
+    "use_sqlalchemy",
+}
+
+_SENSITIVE_RESPONSE_KEYS = {
+    "api_key",
+    "mysql_password",
+    "postgresql_password",
+    "webui_initial_password",
+}
+
+
+class ConfigService:
+    """配置服务"""
+
+    def __init__(self, container):
+        self.container = container
+        self.plugin_config = container.plugin_config
+
+    def _get_container_attr(self, name: str, default: Any = None) -> Any:
+        """Read explicitly assigned container attributes without creating Mock children."""
+        try:
+            attrs = vars(self.container)
+        except TypeError:
+            attrs = {}
+        return attrs.get(name, default)
+
+    def _set_container_attr(self, name: str, value: Any) -> None:
+        try:
+            setattr(self.container, name, value)
+        except (AttributeError, TypeError):
+            logger.debug(f"写入容器属性失败: {name}", exc_info=True)
+
+    def _get_astrbot_config(self) -> Optional[MutableMapping[str, Any]]:
+        astrbot_config = self._get_container_attr("astrbot_config")
+        plugin = self._get_container_attr("plugin_instance")
+        if astrbot_config is None and plugin is not None:
+            astrbot_config = getattr(plugin, "config", None)
+        if isinstance(astrbot_config, MutableMapping):
+            return astrbot_config
+        return None
+
+    def _flatten_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        grouped: Dict[str, Any] = {}
+        direct: Dict[str, Any] = {}
+
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                grouped.update(self._flatten_payload(value))
+            else:
+                direct[key] = value
+
+        # AstrBot's grouped plugin-page config is authoritative over stale top-level compatibility keys.
+        return {**direct, **grouped}
+
+    def _merged_schema_definition(self) -> Dict[str, Any]:
+        return self._merge_schema_definitions(
+            _load_schema_definition(),
+            self._collect_extra_schema(),
+        )
+
+    @staticmethod
+    def _plain_mapping(mapping: MutableMapping[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for key, value in mapping.items():
+            if isinstance(value, MutableMapping):
+                payload[key] = dict(value)
+            else:
+                payload[key] = value
+        return payload
+
+    @staticmethod
+    def _payload_signature(payload: Dict[str, Any]) -> str:
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    @staticmethod
+    def _redact_config_for_response(config: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a copy safe for WebUI/API read responses."""
+        # 递归按键名脱敏：当前 to_dict() 为平铺结构，但配置分组化后
+        # secret 会嵌套在组内，浅层实现会静默失效。
+        def _redact(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: "" if key in _SENSITIVE_RESPONSE_KEYS else _redact(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [_redact(item) for item in value]
+            return value
+
+        return _redact(config)
+
+    def _config_source_signature(
+        self,
+        astrbot_config: MutableMapping[str, Any],
+    ) -> str:
+        return self._payload_signature(self._plain_mapping(astrbot_config))
+
+    def _remember_config_sync_state(
+        self,
+        astrbot_config: MutableMapping[str, Any],
+    ) -> None:
+        self._set_container_attr(
+            "_config_source_sync_signature",
+            self._config_source_signature(astrbot_config),
+        )
+
+    def _forget_config_sync_state(self) -> None:
+        self._set_container_attr("_config_source_sync_signature", None)
+
+    def _last_config_source_signature(
+        self,
+    ) -> Optional[str]:
+        signature = self._get_container_attr("_config_source_sync_signature")
+        if isinstance(signature, str):
+            return signature
+        return None
+
+    def _apply_astrbot_config_to_plugin(
+        self,
+        astrbot_config: MutableMapping[str, Any],
+    ) -> bool:
+        """Pull newer AstrBot plugin-page settings into the WebUI runtime config."""
+        if not self.plugin_config:
+            return False
+
+        flat_config = self._flatten_payload(self._plain_mapping(astrbot_config))
+        known_config = {
+            key: value
+            for key, value in flat_config.items()
+            if hasattr(self.plugin_config, key)
+        }
+        if not known_config:
+            return False
+        initial_webui_password = ""
+        if "webui_initial_password" in known_config:
+            initial_webui_password = str(
+                known_config.get("webui_initial_password") or ""
+            ).strip()
+            known_config["webui_initial_password"] = ""
+
+        original_config = self.plugin_config.to_dict()
+        changed_keys = [
+            key
+            for key, value in known_config.items()
+            if original_config.get(key) != value
+        ]
+        if not changed_keys:
+            return False
+
+        merged_config = {**original_config, **known_config}
+        try:
+            validated_config = self.plugin_config.__class__.model_validate(merged_config)
+        except ValidationError as e:
+            logger.warning(f"同步 AstrBot 插件页配置到 WebUI 失败: {e}", exc_info=True)
+            return False
+
+        for field_name, value in validated_config.model_dump().items():
+            if hasattr(self.plugin_config, field_name):
+                setattr(self.plugin_config, field_name, value)
+
+        if getattr(self.plugin_config, "data_dir", None):
+            self.plugin_config.messages_db_path = os.path.join(
+                self.plugin_config.data_dir, FileNames.MESSAGES_DB_FILE
+            )
+            self.plugin_config.learning_log_path = os.path.join(
+                self.plugin_config.data_dir, FileNames.LEARNING_LOG_FILE
+            )
+
+        if "log_level" in changed_keys or "debug_mode" in changed_keys:
+            self._apply_runtime_log_settings()
+
+        if (
+            initial_webui_password
+            and getattr(self.plugin_config, "enable_webui_password", False) is True
+        ):
+            strength_result = validate_password_strength(initial_webui_password)
+            if strength_result["valid"]:
+                password_success, password_message = AuthService(self.container).configure_password(
+                    initial_webui_password,
+                    must_change=False,
+                )
+                if not password_success:
+                    logger.warning(f"AstrBot 插件页 WebUI 初始密码保存失败: {password_message}")
+                else:
+                    self._clear_astrbot_initial_password(astrbot_config)
+            else:
+                issues = "、".join(strength_result["issues"]) if strength_result["issues"] else "密码强度不足"
+                logger.warning(f"AstrBot 插件页 WebUI 初始密码无效: {issues}")
+
+        self._sync_runtime_components(changed_keys)
+        self._refresh_llm_provider_bindings()
+        logger.info(
+            "AstrBot 插件页配置已应用到运行时: "
+            f"{', '.join(sorted(changed_keys))}"
+        )
+        return True
+
+    def _sync_config_sources(self, *, force: bool = False) -> None:
+        """Refresh runtime config from the single AstrBot plugin-page source."""
+        astrbot_config = self._get_astrbot_config()
+        if astrbot_config is None or not self.plugin_config:
+            return
+
+        signature = self._config_source_signature(astrbot_config)
+        last_signature = self._last_config_source_signature()
+        if not force and last_signature == signature:
+            return
+
+        self._apply_astrbot_config_to_plugin(astrbot_config)
+        self._remember_config_sync_state(astrbot_config)
+
+    def _clear_astrbot_initial_password(
+        self,
+        astrbot_config: MutableMapping[str, Any],
+    ) -> None:
+        changed = False
+        group = astrbot_config.get("Self_Learning_Basic")
+        if isinstance(group, MutableMapping) and group.get("webui_initial_password"):
+            group["webui_initial_password"] = ""
+            changed = True
+        if astrbot_config.get("webui_initial_password"):
+            astrbot_config["webui_initial_password"] = ""
+            changed = True
+        if not changed:
+            return
+
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception as e:
+                logger.warning(f"清空 AstrBot 插件页 WebUI 初始密码失败: {e}", exc_info=True)
+
+    def _apply_runtime_log_settings(self) -> None:
+        applied_level = apply_astrbot_log_level(
+            getattr(self.plugin_config, "log_level", "info"),
+            debug_mode=getattr(self.plugin_config, "debug_mode", False),
+            fallback="info",
+        )
+        self.plugin_config.log_level = applied_level
+        set_debug_mode = None
+        set_trace_enabled = None
+        for module_name in (
+            "self_learning_EterU.services.monitoring.instrumentation",
+            f"{__package__.split('.')[0]}.services.monitoring.instrumentation"
+            if __package__
+            else "",
+        ):
+            if not module_name:
+                continue
+            try:
+                instrumentation = importlib.import_module(module_name)
+                set_debug_mode = getattr(instrumentation, "set_debug_mode")
+                set_trace_enabled = getattr(instrumentation, "set_trace_enabled")
+                break
+            except Exception as exc:
+                logger.debug(f"同步函数级监控配置失败 ({module_name}): {exc}")
+        if set_debug_mode and set_trace_enabled:
+            set_debug_mode(getattr(self.plugin_config, "debug_mode", False))
+            set_trace_enabled(applied_level == "trace")
+        logger.info(f"AstrBot 日志等级已更新为: {applied_level}")
+
+    @staticmethod
+    def _field_group_index(schema_definition: Dict[str, Any]) -> Dict[str, str]:
+        field_to_group: Dict[str, str] = {}
+        for group_key, group_definition in schema_definition.items():
+            if not isinstance(group_definition, dict):
+                continue
+            items = group_definition.get("items", {})
+            if not isinstance(items, dict):
+                continue
+            for field_key in items:
+                field_to_group[field_key] = group_key
+        return field_to_group
+
+    def _sync_astrbot_group_config(
+        self,
+        validated_config: Any,
+        _submitted_keys: List[str],
+    ) -> bool:
+        """Pass the full WebUI config through to AstrBot's grouped plugin-page config."""
+        astrbot_config = self._get_astrbot_config()
+        if astrbot_config is None:
+            return False
+
+        schema_definition = self._merged_schema_definition()
+        current_payload = self._plain_mapping(astrbot_config)
+        schema_fields = {
+            field_name
+            for group_definition in schema_definition.values()
+            if isinstance(group_definition, dict)
+            for field_name in group_definition.get("items", {})
+        }
+        if hasattr(validated_config, "model_dump"):
+            config_values = validated_config.model_dump()
+        else:
+            config_values = {
+                field_name: getattr(validated_config, field_name)
+                for field_name in schema_fields
+                if hasattr(validated_config, field_name)
+            }
+        config_field_names = set(config_values)
+        next_payload = {
+            key: value
+            for key, value in current_payload.items()
+            if key not in config_field_names
+        }
+        synced_groups = set()
+
+        for group_key, group_definition in schema_definition.items():
+            if not isinstance(group_definition, dict):
+                continue
+            items = group_definition.get("items", {})
+            if not isinstance(items, dict):
+                continue
+            group = next_payload.get(group_key)
+            if not isinstance(group, MutableMapping):
+                group = {}
+            else:
+                group = dict(group)
+
+            group_updated = False
+            for field_name in items:
+                if field_name not in config_values:
+                    continue
+                group[field_name] = config_values[field_name]
+                group_updated = True
+
+            if group_updated:
+                next_payload[group_key] = group
+                synced_groups.add(group_key)
+
+        if not synced_groups:
+            return False
+
+        if self._payload_signature(current_payload) == self._payload_signature(
+            next_payload
+        ):
+            return False
+
+        astrbot_config.clear()
+        astrbot_config.update(next_payload)
+
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except TypeError:
+                try:
+                    save_config(self._plain_mapping(astrbot_config))
+                except Exception as e:
+                    logger.warning(f"同步 AstrBot 插件页配置失败: {e}", exc_info=True)
+                    return False
+            except Exception as e:
+                logger.warning(f"同步 AstrBot 插件页配置失败: {e}", exc_info=True)
+                return False
+
+        logger.info(
+            "WebUI 配置已同步到 AstrBot 插件页分组: "
+            f"{', '.join(sorted(synced_groups))}"
+        )
+        return True
+
+    def _sync_runtime_components(self, changed_keys: List[str]) -> None:
+        """Refresh runtime objects that cache values derived from PluginConfig."""
+        plugin = self._get_container_attr("plugin_instance")
+        if plugin is not None:
+            try:
+                plugin.plugin_config = self.plugin_config
+            except Exception:
+                logger.debug("同步 plugin.plugin_config 失败", exc_info=True)
+
+            qq_filter = getattr(plugin, "qq_filter", None)
+            if qq_filter and any(
+                key in changed_keys for key in ("target_qq_list", "target_blacklist")
+            ):
+                try:
+                    qq_filter.target_qq_list = list(self.plugin_config.target_qq_list)
+                    qq_filter.blacklist = list(self.plugin_config.target_blacklist)
+                except Exception:
+                    logger.debug("同步 QQ 过滤器配置失败", exc_info=True)
+
+        self._refresh_learning_runtime(getattr(plugin, "progressive_learning", None))
+        self._refresh_learning_runtime(self._get_container_attr("progressive_learning"))
+
+        self.container.plugin_config = self.plugin_config
+        try:
+            from ..config import WebUIConfig
+            self.container.webui_config = WebUIConfig.from_plugin_config(self.plugin_config)
+        except Exception:
+            logger.debug("同步 WebUIConfig 失败", exc_info=True)
+
+        self._sync_webui_manager(changed_keys)
+
+    def _sync_webui_manager(self, changed_keys: List[str]) -> None:
+        if not any(
+            key in changed_keys
+            for key in (
+                "enable_web_interface",
+                "web_interface_host",
+                "web_interface_port",
+            )
+        ):
+            return
+
+        plugin = self._get_container_attr("plugin_instance")
+        lifecycle = getattr(plugin, "_lifecycle", None)
+        manager = getattr(lifecycle, "_webui_manager", None)
+        if manager is None:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("当前不在事件循环中，跳过 WebUI 运行时启停同步")
+            return
+
+        task = loop.create_task(self._apply_webui_manager_state(manager))
+        background_tasks = getattr(plugin, "background_tasks", None)
+        if background_tasks is not None:
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+
+    async def _apply_webui_manager_state(self, manager: Any) -> None:
+        try:
+            from ..manager import get_server_instance
+        except ImportError:
+            from webui.manager import get_server_instance
+
+        try:
+            if not getattr(self.plugin_config, "enable_web_interface", False):
+                await manager.stop()
+                return
+
+            server = get_server_instance()
+            if server is not None:
+                current_host = getattr(server, "host", None)
+                current_port = getattr(server, "port", None)
+                next_host = getattr(self.plugin_config, "web_interface_host", None)
+                next_port = getattr(self.plugin_config, "web_interface_port", None)
+                if current_host != next_host or current_port != next_port:
+                    await manager.stop()
+                    server = None
+
+            if server is None:
+                if not manager.create_server():
+                    return
+
+            plugin = self._get_container_attr("plugin_instance")
+            db_manager = (
+                self._get_container_attr("database_manager")
+                or getattr(plugin, "db_manager", None)
+            )
+            await manager.immediate_start(db_manager)
+        except Exception as exc:
+            logger.warning(f"同步 WebUI 运行状态失败: {exc}", exc_info=True)
+
+    def _refresh_llm_provider_bindings(self) -> None:
+        """Rebind cached LLM adapters after runtime provider settings change."""
+        adapters: List[Any] = []
+        seen: set[int] = set()
+
+        def add_adapter(adapter: Any) -> None:
+            if not adapter or not hasattr(adapter, "initialize_providers"):
+                return
+            adapter_id = id(adapter)
+            if adapter_id in seen:
+                return
+            seen.add(adapter_id)
+            adapters.append(adapter)
+
+        add_adapter(self._get_container_attr("llm_adapter"))
+
+        plugin = self._get_container_attr("plugin_instance")
+        if plugin is not None:
+            try:
+                add_adapter(vars(plugin).get("llm_adapter"))
+            except TypeError:
+                add_adapter(getattr(plugin, "llm_adapter", None))
+
+        factory_manager = self._get_container_attr("factory_manager")
+        service_factory = None
+        if factory_manager is not None:
+            try:
+                service_factory = factory_manager.get_service_factory()
+            except Exception:
+                logger.debug("获取 service_factory 失败，跳过 LLM Provider 重绑", exc_info=True)
+        if service_factory is not None:
+            try:
+                add_adapter(vars(service_factory).get("_framework_llm_adapter"))
+            except TypeError:
+                add_adapter(getattr(service_factory, "_framework_llm_adapter", None))
+
+        for adapter in adapters:
+            try:
+                adapter.initialize_providers(self.plugin_config)
+            except Exception as e:
+                logger.warning(f"重新初始化 LLM Provider 失败: {e}", exc_info=True)
+
+    def _refresh_learning_runtime(self, progressive_learning: Any) -> None:
+        if not progressive_learning:
+            return
+        if hasattr(progressive_learning, "batch_size"):
+            progressive_learning.batch_size = self.plugin_config.max_messages_per_batch
+        if hasattr(progressive_learning, "learning_interval"):
+            progressive_learning.learning_interval = (
+                self.plugin_config.learning_interval_hours * 3600
+            )
+        if hasattr(progressive_learning, "quality_threshold"):
+            progressive_learning.quality_threshold = self.plugin_config.style_update_threshold
+
+    @staticmethod
+    def _normalize_provider_type(provider_type: Any, default_type: str = "") -> str:
+        raw_value = provider_type
+        if hasattr(raw_value, "value"):
+            raw_value = raw_value.value
+        elif hasattr(raw_value, "name"):
+            raw_value = raw_value.name
+        normalized = str(raw_value or default_type or "").strip().lower()
+        return _PROVIDER_TYPE_ALIASES.get(normalized, normalized)
+
+    @staticmethod
+    def _provider_type_value(provider: Any, default_type: str = "") -> str:
+        try:
+            meta = provider.meta()
+        except Exception:
+            meta = None
+
+        raw_type = getattr(getattr(meta, "provider_type", None), "value", None)
+        if not raw_type:
+            raw_type = getattr(getattr(meta, "provider_type", None), "name", None)
+        if not raw_type:
+            raw_type = default_type
+        return ConfigService._normalize_provider_type(raw_type, default_type)
+
+    @staticmethod
+    def _provider_type_label(provider_type: str) -> str:
+        return _PROVIDER_TYPE_LABELS.get(provider_type, provider_type)
+
+    @staticmethod
+    def _model_id_from_item(item: Any) -> Optional[str]:
+        if isinstance(item, bytes):
+            try:
+                item = item.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if isinstance(item, str):
+            model_id = item.strip()
+            return model_id or None
+        if isinstance(item, dict):
+            for key in ("id", "name", "model"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return None
+
+        value = getattr(item, "id", None) or getattr(item, "name", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    @staticmethod
+    def _normalize_model_list(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = value.get("data") or value.get("models") or []
+        elif isinstance(value, (str, bytes)):
+            value = [value]
+
+        models: List[str] = []
+        seen = set()
+        for item in ConfigService._as_provider_list(value):
+            model_id = ConfigService._model_id_from_item(item)
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            models.append(model_id)
+        return sorted(models)
+
+    @staticmethod
+    def _model_preview(models: List[str]) -> str:
+        preview = ", ".join(models[:_PROVIDER_OPTION_MODEL_PREVIEW_LIMIT])
+        remaining = len(models) - _PROVIDER_OPTION_MODEL_PREVIEW_LIMIT
+        if remaining > 0:
+            preview = f"{preview} 等 {len(models)} 个模型"
+        return preview
+
+    @staticmethod
+    def _option_model_label(model_name: Any, available_models: List[str]) -> str:
+        configured_model = str(model_name or "").strip()
+        if available_models:
+            if configured_model and configured_model in available_models:
+                return configured_model
+            return ConfigService._model_preview(available_models)
+        return configured_model
+
+    @staticmethod
+    def _build_provider_option(
+        provider_id: Any,
+        model_name: Any = None,
+        provider_type: str = "",
+        available_models: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not provider_id:
+            return None
+
+        live_models = ConfigService._normalize_model_list(available_models)
+        model_label = ConfigService._option_model_label(model_name, live_models)
+        configured_model = str(model_name or "").strip()
+        label_parts = [str(provider_id)]
+        if model_label and model_label not in str(provider_id):
+            label_parts.append(model_label)
+        if provider_type:
+            label_parts.append(provider_type)
+
+        option: Dict[str, Any] = {
+            "value": str(provider_id),
+            "label": " / ".join(label_parts),
+            "provider_type": provider_type,
+            "provider_type_label": ConfigService._provider_type_label(provider_type),
+            "model_source": "live" if live_models else "configured",
+        }
+        if live_models:
+            option["available_models"] = live_models
+            option["model_count"] = len(live_models)
+            if configured_model:
+                option["configured_model_available"] = configured_model in live_models
+        return option
+
+    @staticmethod
+    def _provider_identity(provider: Any, default_type: str = "") -> Tuple[Any, Any, str]:
+        try:
+            meta = provider.meta()
+        except Exception:
+            meta = None
+
+        provider_id = getattr(meta, "id", None) or getattr(provider, "id", None)
+        provider_type = ConfigService._provider_type_value(provider, default_type)
+        model_name = (
+            getattr(meta, "model", None)
+            or getattr(provider, "model", None)
+            or getattr(provider, "model_name", None)
+        )
+        return provider_id, model_name, provider_type
+
+    @staticmethod
+    def _provider_option(provider: Any, default_type: str = "") -> Optional[Dict[str, Any]]:
+        provider_id, model_name, provider_type = ConfigService._provider_identity(
+            provider,
+            default_type,
+        )
+        return ConfigService._build_provider_option(provider_id, model_name, provider_type)
+
+    @staticmethod
+    def _provider_identity_from_config(
+        provider_config: Any,
+        provider_source_types: Dict[str, str],
+        default_type: str = "",
+    ) -> Optional[Tuple[Any, Any, str]]:
+        if not isinstance(provider_config, dict):
+            return None
+
+        provider_id = provider_config.get("id") or provider_config.get("provider_id")
+        if not provider_id:
+            return None
+
+        provider_source_id = provider_config.get("provider_source_id")
+        provider_type = provider_config.get("provider_type")
+        if not provider_type and provider_source_id:
+            provider_type = provider_source_types.get(str(provider_source_id))
+        provider_type = ConfigService._normalize_provider_type(provider_type, default_type)
+
+        model_name = (
+            provider_config.get("model")
+            or provider_config.get("embedding_model")
+            or provider_config.get("rerank_model")
+        )
+        return provider_id, model_name, provider_type
+
+    @staticmethod
+    def _provider_option_from_config(
+        provider_config: Any,
+        provider_source_types: Dict[str, str],
+        default_type: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        identity = ConfigService._provider_identity_from_config(
+            provider_config,
+            provider_source_types,
+            default_type,
+        )
+        if not identity:
+            return None
+
+        provider_id, model_name, provider_type = identity
+        return ConfigService._build_provider_option(provider_id, model_name, provider_type)
+
+    @staticmethod
+    def _dedupe_options(options: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        result: List[Dict[str, Any]] = []
+        positions: Dict[Tuple[Any, Any], int] = {}
+        for option in options:
+            value = option.get("value")
+            provider_type = option.get("provider_type", "")
+            key = (value, provider_type)
+            if not value:
+                continue
+            if key in seen:
+                existing_index = positions[key]
+                existing = result[existing_index]
+                if option.get("model_source") == "live" and existing.get("model_source") != "live":
+                    result[existing_index] = option
+                continue
+            seen.add(key)
+            positions[key] = len(result)
+            result.append(option)
+        return result
+
+    @staticmethod
+    def _as_provider_list(value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, (str, bytes, dict)):
+            return []
+        try:
+            return list(value)
+        except TypeError:
+            return []
+
+    def _get_provider_context(self):
+        factory_manager = getattr(self.container, "factory_manager", None)
+        if not factory_manager or not hasattr(factory_manager, "get_service_factory"):
+            return None
+        service_factory = factory_manager.get_service_factory()
+        return getattr(service_factory, "context", None)
+
+    @staticmethod
+    def _provider_source_types(provider_manager: Any) -> Dict[str, str]:
+        source_types: Dict[str, str] = {}
+        for provider_source in ConfigService._as_provider_list(
+            getattr(provider_manager, "provider_sources_config", None)
+        ):
+            if not isinstance(provider_source, dict):
+                continue
+            source_id = provider_source.get("id")
+            if not source_id:
+                continue
+            source_types[str(source_id)] = ConfigService._normalize_provider_type(
+                provider_source.get("provider_type"),
+                "chat_completion",
+            )
+        return source_types
+
+    @staticmethod
+    def _merged_provider_config(provider_manager: Any, provider_config: Any) -> Any:
+        if not isinstance(provider_config, dict):
+            return provider_config
+
+        merge_getter = getattr(provider_manager, "get_merged_provider_config", None)
+        if callable(merge_getter):
+            try:
+                merged = merge_getter(provider_config)
+                if isinstance(merged, dict):
+                    return merged
+            except Exception:
+                logger.debug("合并 Provider 配置失败", exc_info=True)
+
+        provider_source_id = provider_config.get("provider_source_id")
+        if not provider_source_id:
+            return provider_config
+
+        for provider_source in ConfigService._as_provider_list(
+            getattr(provider_manager, "provider_sources_config", None)
+        ):
+            if not isinstance(provider_source, dict):
+                continue
+            if provider_source.get("id") != provider_source_id:
+                continue
+            merged = {**provider_source, **provider_config}
+            if provider_config.get("id"):
+                merged["id"] = provider_config["id"]
+            return merged
+        return provider_config
+
+    @staticmethod
+    def _resolve_api_key_value(value: Any) -> str:
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                resolved = ConfigService._resolve_api_key_value(item)
+                if resolved:
+                    return resolved
+            return ""
+        if not isinstance(value, str):
+            return ""
+
+        key = value.strip()
+        if not key:
+            return ""
+        if key.startswith("$"):
+            env_key = key[1:]
+            if env_key.startswith("{") and env_key.endswith("}"):
+                env_key = env_key[1:-1]
+            return os.getenv(env_key, "").strip() if env_key else ""
+        return key
+
+    @staticmethod
+    def _provider_api_key(provider_config: Dict[str, Any], provider_type: str) -> str:
+        if provider_type == "embedding":
+            key_fields = ("embedding_api_key", "api_key", "key")
+        elif provider_type == "rerank":
+            key_fields = (
+                "rerank_api_key",
+                "nvidia_rerank_api_key",
+                "api_key",
+                "key",
+            )
+        else:
+            key_fields = ("key", "api_key")
+
+        for field in key_fields:
+            resolved = ConfigService._resolve_api_key_value(provider_config.get(field))
+            if resolved:
+                return resolved
+        return ""
+
+    @staticmethod
+    def _provider_api_base(provider_config: Dict[str, Any], provider_type: str) -> str:
+        if provider_type == "embedding":
+            base_fields = ("embedding_api_base", "api_base")
+        elif provider_type == "rerank":
+            base_fields = (
+                "rerank_api_base",
+                "nvidia_rerank_api_base",
+                "api_base",
+            )
+        else:
+            base_fields = ("api_base",)
+
+        for field in base_fields:
+            value = provider_config.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _models_url_from_api_base(api_base: str) -> str:
+        base = str(api_base or "").strip().rstrip("/")
+        if not base:
+            return ""
+
+        lower_base = base.lower()
+        endpoint_suffixes = (
+            "/chat/completions",
+            "/embeddings",
+            "/rerank",
+            "/rerank/completions",
+        )
+        for suffix in endpoint_suffixes:
+            if lower_base.endswith(suffix):
+                base = base[: -len(suffix)]
+                lower_base = base.lower()
+                break
+
+        if lower_base.endswith("/models"):
+            return base
+        if lower_base.endswith("/v1") or lower_base.endswith("/v4"):
+            return f"{base}/models"
+        return f"{base}/v1/models"
+
+    @staticmethod
+    def _models_payload_to_list(payload: Any) -> List[str]:
+        if isinstance(payload, dict):
+            return ConfigService._normalize_model_list(
+                payload.get("data") or payload.get("models") or []
+            )
+        return ConfigService._normalize_model_list(payload)
+
+    async def _fetch_models_from_endpoint(
+        self,
+        models_url: str,
+        api_key: str = "",
+        custom_headers: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        if not models_url:
+            return []
+
+        headers: Dict[str, str] = {"Accept": "application/json"}
+        if isinstance(custom_headers, dict):
+            for key, value in custom_headers.items():
+                if key and value is not None:
+                    headers[str(key)] = str(value)
+        if api_key and not any(key.lower() == "authorization" for key in headers):
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        timeout = aiohttp.ClientTimeout(total=_PROVIDER_MODELS_TIMEOUT_SECONDS)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(models_url, headers=headers) as response:
+                    response.raise_for_status()
+                    payload = await response.json(content_type=None)
+        except Exception as exc:
+            logger.debug(f"实时获取模型列表失败: {models_url}: {exc}")
+            return []
+
+        return self._models_payload_to_list(payload)
+
+    async def _models_from_provider_config(
+        self,
+        provider_config: Any,
+        provider_type: str,
+        model_cache: Dict[Tuple[str, str, str], List[str]],
+    ) -> List[str]:
+        if not isinstance(provider_config, dict):
+            return []
+
+        provider_id = str(provider_config.get("id") or provider_config.get("provider_id") or "")
+        cache_key = ("config", provider_type, provider_id)
+        if cache_key in model_cache:
+            return model_cache[cache_key]
+
+        api_base = self._provider_api_base(provider_config, provider_type)
+        models_url = self._models_url_from_api_base(api_base)
+        api_key = self._provider_api_key(provider_config, provider_type)
+        custom_headers = provider_config.get("custom_headers")
+        models = await self._fetch_models_from_endpoint(
+            models_url,
+            api_key,
+            custom_headers if isinstance(custom_headers, dict) else None,
+        )
+        model_cache[cache_key] = models
+        return models
+
+    async def _models_from_provider_instance(
+        self,
+        provider: Any,
+        provider_id: Any,
+        provider_type: str,
+        model_cache: Dict[Tuple[str, str, str], List[str]],
+    ) -> List[str]:
+        cache_key = ("instance", provider_type, str(provider_id))
+        if cache_key in model_cache:
+            return model_cache[cache_key]
+
+        models: List[str] = []
+        get_models = getattr(provider, "get_models", None)
+        if callable(get_models):
+            try:
+                if inspect.iscoroutinefunction(get_models):
+                    result = await asyncio.wait_for(
+                        get_models(),
+                        timeout=_PROVIDER_MODELS_TIMEOUT_SECONDS,
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(get_models),
+                        timeout=_PROVIDER_MODELS_TIMEOUT_SECONDS,
+                    )
+                if inspect.isawaitable(result):
+                    result = await asyncio.wait_for(
+                        result,
+                        timeout=_PROVIDER_MODELS_TIMEOUT_SECONDS,
+                    )
+                models = self._normalize_model_list(result)
+            except asyncio.TimeoutError:
+                logger.debug(f"Provider {provider_id} 实时获取模型列表超时")
+            except Exception:
+                logger.debug(f"Provider {provider_id} 实时获取模型列表失败", exc_info=True)
+
+        if not models:
+            provider_config = getattr(provider, "provider_config", None)
+            models = await self._models_from_provider_config(
+                provider_config,
+                provider_type,
+                model_cache,
+            )
+
+        model_cache[cache_key] = models
+        return models
+
+    async def _provider_option_async(
+        self,
+        provider: Any,
+        default_type: str,
+        model_cache: Dict[Tuple[str, str, str], List[str]],
+    ) -> Optional[Dict[str, Any]]:
+        provider_id, model_name, provider_type = self._provider_identity(
+            provider,
+            default_type,
+        )
+        if not provider_id:
+            return None
+
+        models = await self._models_from_provider_instance(
+            provider,
+            provider_id,
+            provider_type,
+            model_cache,
+        )
+        return self._build_provider_option(
+            provider_id,
+            model_name,
+            provider_type,
+            models,
+        )
+
+    async def _provider_option_from_config_async(
+        self,
+        provider_config: Any,
+        provider_source_types: Dict[str, str],
+        default_type: str,
+        model_cache: Dict[Tuple[str, str, str], List[str]],
+    ) -> Optional[Dict[str, Any]]:
+        identity = self._provider_identity_from_config(
+            provider_config,
+            provider_source_types,
+            default_type,
+        )
+        if not identity:
+            return None
+
+        provider_id, model_name, provider_type = identity
+        models = await self._models_from_provider_config(
+            provider_config,
+            provider_type,
+            model_cache,
+        )
+        return self._build_provider_option(
+            provider_id,
+            model_name,
+            provider_type,
+            models,
+        )
+
+    def _provider_options(self, expected_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        factory_manager = getattr(self.container, "factory_manager", None)
+        if not factory_manager or not hasattr(factory_manager, "get_service_factory"):
+            return []
+
+        try:
+            context = self._get_provider_context()
+            if not context:
+                return []
+
+            options: List[Dict[str, Any]] = []
+            expected = self._normalize_provider_type(expected_type)
+            provider_manager = getattr(context, "provider_manager", None)
+
+            if expected in {"", "chat_completion", "llm", "chat"} and callable(getattr(context, "get_all_providers", None)):
+                for provider in self._as_provider_list(context.get_all_providers()):
+                    option = self._provider_option(provider, "chat_completion")
+                    if option:
+                        options.append(option)
+            if expected in {"", "chat_completion"} and provider_manager and hasattr(provider_manager, "provider_insts"):
+                for provider in self._as_provider_list(provider_manager.provider_insts):
+                    option = self._provider_option(provider, "chat_completion")
+                    if option:
+                        options.append(option)
+
+            if expected in {"", "embedding"} and callable(getattr(context, "get_all_embedding_providers", None)):
+                for provider in self._as_provider_list(context.get_all_embedding_providers()):
+                    option = self._provider_option(provider, "embedding")
+                    if option:
+                        options.append(option)
+            if expected in {"", "embedding"} and provider_manager and hasattr(provider_manager, "embedding_provider_insts"):
+                for provider in self._as_provider_list(provider_manager.embedding_provider_insts):
+                    option = self._provider_option(provider, "embedding")
+                    if option:
+                        options.append(option)
+
+            if expected in {"", "rerank", "reranker"}:
+                rerank_providers = []
+                rerank_getter = getattr(context, "get_all_rerank_providers", None)
+                if callable(rerank_getter):
+                    rerank_providers = self._as_provider_list(rerank_getter())
+                if not rerank_providers and provider_manager and hasattr(provider_manager, "rerank_provider_insts"):
+                    rerank_providers = provider_manager.rerank_provider_insts
+                for provider in self._as_provider_list(rerank_providers):
+                    option = self._provider_option(provider, "rerank")
+                    if option:
+                        options.append(option)
+
+            if expected == "" and provider_manager and hasattr(provider_manager, "inst_map"):
+                for provider in provider_manager.inst_map.values():
+                    option = self._provider_option(provider)
+                    if option:
+                        options.append(option)
+
+            if provider_manager and hasattr(provider_manager, "providers_config"):
+                provider_source_types = self._provider_source_types(provider_manager)
+                for provider_config in self._as_provider_list(provider_manager.providers_config):
+                    option = self._provider_option_from_config(provider_config, provider_source_types)
+                    if not option:
+                        continue
+                    option_type = option.get("provider_type", "")
+                    if expected and option_type != expected:
+                        continue
+                    options.append(option)
+
+            return self._dedupe_options(options)
+        except Exception as e:
+            logger.warning(f"获取 Provider 列表失败: {e}")
+            return []
+
+    async def _provider_options_async(
+        self,
+        expected_type: Optional[str] = None,
+        model_cache: Optional[Dict[Tuple[str, str, str], List[str]]] = None,
+    ) -> List[Dict[str, Any]]:
+        factory_manager = getattr(self.container, "factory_manager", None)
+        if not factory_manager or not hasattr(factory_manager, "get_service_factory"):
+            return []
+
+        try:
+            context = self._get_provider_context()
+            if not context:
+                return []
+
+            options: List[Dict[str, Any]] = []
+            expected = self._normalize_provider_type(expected_type)
+            provider_manager = getattr(context, "provider_manager", None)
+            cache = model_cache if model_cache is not None else {}
+
+            if expected in {"", "chat_completion", "llm", "chat"} and callable(getattr(context, "get_all_providers", None)):
+                for provider in self._as_provider_list(context.get_all_providers()):
+                    option = await self._provider_option_async(
+                        provider,
+                        "chat_completion",
+                        cache,
+                    )
+                    if option:
+                        options.append(option)
+            if expected in {"", "chat_completion"} and provider_manager and hasattr(provider_manager, "provider_insts"):
+                for provider in self._as_provider_list(provider_manager.provider_insts):
+                    option = await self._provider_option_async(
+                        provider,
+                        "chat_completion",
+                        cache,
+                    )
+                    if option:
+                        options.append(option)
+
+            if expected in {"", "embedding"} and callable(getattr(context, "get_all_embedding_providers", None)):
+                for provider in self._as_provider_list(context.get_all_embedding_providers()):
+                    option = await self._provider_option_async(
+                        provider,
+                        "embedding",
+                        cache,
+                    )
+                    if option:
+                        options.append(option)
+            if expected in {"", "embedding"} and provider_manager and hasattr(provider_manager, "embedding_provider_insts"):
+                for provider in self._as_provider_list(provider_manager.embedding_provider_insts):
+                    option = await self._provider_option_async(
+                        provider,
+                        "embedding",
+                        cache,
+                    )
+                    if option:
+                        options.append(option)
+
+            if expected in {"", "rerank", "reranker"}:
+                rerank_providers = []
+                rerank_getter = getattr(context, "get_all_rerank_providers", None)
+                if callable(rerank_getter):
+                    rerank_providers = self._as_provider_list(rerank_getter())
+                if not rerank_providers and provider_manager and hasattr(provider_manager, "rerank_provider_insts"):
+                    rerank_providers = provider_manager.rerank_provider_insts
+                for provider in self._as_provider_list(rerank_providers):
+                    option = await self._provider_option_async(
+                        provider,
+                        "rerank",
+                        cache,
+                    )
+                    if option:
+                        options.append(option)
+
+            if expected == "" and provider_manager and hasattr(provider_manager, "inst_map"):
+                for provider in provider_manager.inst_map.values():
+                    option = await self._provider_option_async(
+                        provider,
+                        "",
+                        cache,
+                    )
+                    if option:
+                        options.append(option)
+
+            if provider_manager and hasattr(provider_manager, "providers_config"):
+                provider_source_types = self._provider_source_types(provider_manager)
+                for provider_config in self._as_provider_list(provider_manager.providers_config):
+                    merged_config = self._merged_provider_config(
+                        provider_manager,
+                        provider_config,
+                    )
+                    identity = self._provider_identity_from_config(
+                        merged_config,
+                        provider_source_types,
+                    )
+                    if not identity:
+                        continue
+                    option_type = identity[2]
+                    if expected and option_type != expected:
+                        continue
+                    option = await self._provider_option_from_config_async(
+                        merged_config,
+                        provider_source_types,
+                        "",
+                        cache,
+                    )
+                    if not option:
+                        continue
+                    options.append(option)
+
+            return self._dedupe_options(options)
+        except Exception as e:
+            logger.warning(f"获取 Provider 列表失败: {e}")
+            return []
+
+    async def _safe_provider_options_async(
+        self,
+        expected_type: str,
+        model_cache: Dict[Tuple[str, str, str], List[str]],
+    ) -> List[Dict[str, Any]]:
+        try:
+            return await self._provider_options_async(expected_type, model_cache)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"获取 {expected_type} Provider 列表失败: {exc}")
+            return []
+
+    async def _provider_options_by_type_async(
+        self,
+        model_cache: Dict[Tuple[str, str, str], List[str]],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        provider_types = ("chat_completion", "embedding", "rerank")
+        results = await asyncio.gather(
+            *(
+                self._safe_provider_options_async(provider_type, model_cache)
+                for provider_type in provider_types
+            )
+        )
+        return dict(zip(provider_types, results))
+
+    def _provider_options_by_type_fallback(self) -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            "chat_completion": self._provider_options("chat_completion"),
+            "embedding": self._provider_options("embedding"),
+            "rerank": self._provider_options("rerank"),
+        }
+
+    @staticmethod
+    def _provider_expected_type_for_field(key: str) -> Optional[str]:
+        if key in {"filter_provider_id", "refine_provider_id", "reinforce_provider_id"}:
+            return "chat_completion"
+        if key == "embedding_provider_id":
+            return "embedding"
+        if key == "rerank_provider_id":
+            return "rerank"
+        return None
+
+    @staticmethod
+    def _provider_options_for_field(
+        provider_type: str,
+        provider_options_by_type: Optional[Dict[str, List[Dict[str, Any]]]],
+    ) -> List[Dict[str, Any]]:
+        if provider_options_by_type is None:
+            return []
+        if provider_type:
+            return provider_options_by_type.get(provider_type, [])
+        return ConfigService._dedupe_options(
+            [
+                option
+                for options in provider_options_by_type.values()
+                for option in options
+            ]
+        )
+
+    def _build_field_spec(
+        self,
+        key: str,
+        raw_spec: Dict[str, Any],
+        current_config: Dict[str, Any],
+        provider_options_by_type: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> Dict[str, Any]:
+        field_type = raw_spec.get("type", "string")
+        widget = "text"
+        if raw_spec.get("_readonly"):
+            widget = "readonly"
+        elif raw_spec.get("_secret"):
+            widget = "password"
+        elif raw_spec.get("_special") == "select_provider" or key.endswith("_provider_id"):
+            widget = "provider"
+        elif key in _ENUM_FIELD_OPTIONS:
+            widget = "select"
+        elif field_type == "bool":
+            widget = "toggle"
+        elif field_type in {"int", "float"}:
+            widget = "number"
+        elif field_type == "list":
+            widget = "textarea"
+
+        default_value = raw_spec.get("default")
+        value = current_config.get(key, default_value)
+        if field_type == "list" and value is None:
+            value = []
+
+        field_spec = {
+            "key": key,
+            "label": raw_spec.get("description", key),
+            "hint": raw_spec.get("hint", ""),
+            "type": field_type,
+            "widget": widget,
+            "default": default_value,
+            "value": value,
+            "editable": not raw_spec.get("_readonly", False),
+            "secret": bool(raw_spec.get("_secret")),
+            "nullable": default_value is None or raw_spec.get("_nullable", False) or key.endswith("_provider_id"),
+            "restart_required": key in _RESTART_REQUIRED_KEYS,
+        }
+        if raw_spec.get("_secret"):
+            field_spec["value"] = ""
+
+        if field_type == "list":
+            items_spec = raw_spec.get("items", {})
+            if isinstance(items_spec, dict):
+                field_spec["item_type"] = items_spec.get("type", "string")
+            else:
+                field_spec["item_type"] = "string"
+
+        options = raw_spec.get("options")
+        if key in _ENUM_FIELD_OPTIONS:
+            options = _ENUM_FIELD_OPTIONS[key]
+        if options:
+            field_spec["options"] = options
+
+        if field_spec["widget"] == "provider":
+            field_spec["provider_type"] = (
+                self._provider_expected_type_for_field(key)
+                or self._normalize_provider_type(raw_spec.get("_provider_type"))
+                or ""
+            )
+            field_spec["provider_type_label"] = _PROVIDER_TYPE_LABELS.get(
+                field_spec["provider_type"],
+                field_spec["provider_type"] or "Provider",
+            )
+            if provider_options_by_type is not None:
+                field_spec["options"] = self._provider_options_for_field(
+                    field_spec["provider_type"],
+                    provider_options_by_type,
+                )
+            else:
+                field_spec["options"] = self._provider_options(field_spec["provider_type"])
+
+        return field_spec
+
+    def _build_group_schema(
+        self,
+        schema_definition: Dict[str, Any],
+        provider_options_by_type: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
+        current_config = self.plugin_config.to_dict() if self.plugin_config else {}
+        groups: List[Dict[str, Any]] = []
+
+        for group_key, group_definition in schema_definition.items():
+            if not isinstance(group_definition, dict):
+                continue
+            items = group_definition.get("items", {})
+            if not isinstance(items, dict):
+                continue
+
+            fields = [
+                self._build_field_spec(
+                    field_key,
+                    field_spec,
+                    current_config,
+                    provider_options_by_type,
+                )
+                for field_key, field_spec in items.items()
+            ]
+
+            groups.append(
+                {
+                    "key": group_key,
+                    "title": group_definition.get("description", group_key),
+                    "hint": group_definition.get("hint", ""),
+                    "fields": fields,
+                }
+            )
+
+        return groups
+
+    def _collect_extra_schema(self) -> Dict[str, Any]:
+        return _EXTRA_SCHEMA_DEFINITION
+
+    def _merge_schema_definitions(
+        self,
+        base_schema: Dict[str, Any],
+        extra_schema: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        merged: Dict[str, Any] = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in base_schema.items()
+        }
+
+        for group_key, group_definition in extra_schema.items():
+            if (
+                group_key in merged
+                and isinstance(merged[group_key], dict)
+                and isinstance(group_definition, dict)
+            ):
+                current_group = dict(merged[group_key])
+                for key, value in group_definition.items():
+                    if key == "items" and isinstance(value, dict):
+                        current_items = current_group.get("items", {})
+                        if not isinstance(current_items, dict):
+                            current_items = {}
+                        current_group["items"] = {**current_items, **value}
+                    else:
+                        current_group[key] = value
+                merged[group_key] = current_group
+            else:
+                merged[group_key] = group_definition
+
+        return merged
+
+    async def get_config(self) -> Dict[str, Any]:
+        """
+        获取插件配置
+
+        Returns:
+            Dict: 插件配置字典
+        """
+        if self.plugin_config:
+            self._sync_config_sources()
+            return self._redact_config_for_response(self.plugin_config.to_dict())
+        raise ValueError("Plugin config not initialized")
+
+    async def get_config_schema(self) -> Dict[str, Any]:
+        """获取 dashboard 全量设置所需的 schema 和当前值。"""
+        if not self.plugin_config:
+            raise ValueError("Plugin config not initialized")
+
+        self._sync_config_sources()
+        merged_schema = self._merged_schema_definition()
+        model_cache: Dict[Tuple[str, str, str], List[str]] = {}
+        try:
+            provider_options_by_type = await asyncio.wait_for(
+                self._provider_options_by_type_async(model_cache),
+                timeout=_PROVIDER_SCHEMA_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "获取 Provider 模型列表超时，设置页将先使用已配置模型降级渲染"
+            )
+            provider_options_by_type = self._provider_options_by_type_fallback()
+        provider_options = self._dedupe_options(
+            [
+                option
+                for options in provider_options_by_type.values()
+                for option in options
+            ]
+        )
+
+        return {
+            "config": self._redact_config_for_response(self.plugin_config.to_dict()),
+            "groups": self._build_group_schema(
+                merged_schema,
+                provider_options_by_type,
+            ),
+            "warnings": get_config_cost_warnings(self.plugin_config),
+            "provider_options": provider_options,
+            "provider_options_by_type": provider_options_by_type,
+        }
+
+    async def update_config(self, new_config: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        更新插件配置
+
+        Args:
+            new_config: 新的配置数据
+
+        Returns:
+            Tuple[bool, str, Dict]: (是否成功, 消息, 更新后的配置)
+        """
+        if not self.plugin_config:
+            raise ValueError("Plugin config not initialized")
+
+        payload = new_config or {}
+        if isinstance(payload, dict):
+            for wrapper_key in ("config", "new_config", "settings", "data"):
+                wrapped = payload.get(wrapper_key)
+                if isinstance(wrapped, dict):
+                    payload = wrapped
+                    break
+
+        flat_config = self._flatten_payload(payload if isinstance(payload, dict) else {})
+        initial_webui_password = ""
+        if "webui_initial_password" in flat_config:
+            initial_webui_password = str(flat_config.get("webui_initial_password") or "").strip()
+            flat_config["webui_initial_password"] = ""
+
+        original_config = self.plugin_config.to_dict()
+        safe_original_config = self._redact_config_for_response(original_config)
+        merged_config = dict(original_config)
+        changed_keys: List[str] = []
+
+        for key, value in flat_config.items():
+            if hasattr(self.plugin_config, key):
+                merged_config[key] = value
+                if original_config.get(key) != value:
+                    changed_keys.append(key)
+            else:
+                logger.warning(f"配置项 {key} 不存在，跳过")
+
+        try:
+            validated_config = self.plugin_config.__class__.model_validate(merged_config)
+        except ValidationError as e:
+            logger.error(f"配置校验失败: {e}", exc_info=True)
+            return False, f"配置校验失败: {str(e)}", safe_original_config
+
+        validation_messages = validated_config.validate_config()
+        blocking_errors = [msg for msg in validation_messages if not msg.startswith(" ")]
+        warnings = [msg.strip() for msg in validation_messages if msg.startswith(" ")]
+
+        provider_error = "至少需要配置一个模型提供商ID"
+        non_provider_errors = [msg for msg in blocking_errors if provider_error not in msg]
+        if non_provider_errors:
+            return False, "；".join(non_provider_errors), safe_original_config
+
+        if provider_error in "；".join(blocking_errors):
+            warnings.append("至少需要配置一个模型提供商ID，系统将继续依赖 AstrBot 的自动兜底 Provider 选择")
+
+        if self._get_astrbot_config() is None:
+            return False, "AstrBot 插件配置不可用，无法持久化到统一配置", safe_original_config
+
+        auth_service = AuthService(self.container)
+        password_enabled = getattr(validated_config, "enable_webui_password", False) is True
+        if initial_webui_password and not password_enabled:
+            return False, "设置 WebUI 初始密码前请先启用 WebUI 登录密码", safe_original_config
+
+        if initial_webui_password:
+            strength_result = validate_password_strength(initial_webui_password)
+            if not strength_result["valid"]:
+                issues = "、".join(strength_result["issues"]) if strength_result["issues"] else "密码强度不足"
+                return False, issues, safe_original_config
+
+        if (
+            password_enabled
+            and not initial_webui_password
+            and not auth_service.has_password_config()
+            and not os.getenv(INITIAL_WEBUI_PASSWORD_ENV_VAR, "").strip()
+        ):
+            return False, (
+                "开启 WebUI 登录密码前，请填写 WebUI 一次性初始密码，"
+                f"或设置环境变量 {INITIAL_WEBUI_PASSWORD_ENV_VAR}"
+            ), safe_original_config
+
+        for field_name, value in validated_config.model_dump().items():
+            if hasattr(self.plugin_config, field_name):
+                setattr(self.plugin_config, field_name, value)
+
+        if "log_level" in changed_keys or "debug_mode" in changed_keys:
+            self._apply_runtime_log_settings()
+
+        if getattr(self.plugin_config, "data_dir", None):
+            self.plugin_config.messages_db_path = os.path.join(
+                self.plugin_config.data_dir, FileNames.MESSAGES_DB_FILE
+            )
+            self.plugin_config.learning_log_path = os.path.join(
+                self.plugin_config.data_dir, FileNames.LEARNING_LOG_FILE
+            )
+
+        if initial_webui_password:
+            password_success, password_message = AuthService(self.container).configure_password(
+                initial_webui_password,
+                must_change=False,
+            )
+            if not password_success:
+                return False, password_message, safe_original_config
+
+        self._sync_runtime_components(changed_keys)
+        astrbot_config_synced = self._sync_astrbot_group_config(
+            self.plugin_config,
+            list(flat_config),
+        )
+
+        self._refresh_llm_provider_bindings()
+
+        astrbot_config = self._get_astrbot_config()
+        if astrbot_config:
+            self._remember_config_sync_state(astrbot_config)
+        else:
+            self._forget_config_sync_state()
+
+        if changed_keys:
+            logger.info(f"配置已更新: {', '.join(changed_keys)}")
+
+        message = "Config updated successfully"
+        if warnings:
+            message = f"{message}，{'; '.join(warnings)}"
+        if astrbot_config_synced:
+            message = f"{message}；已同步到插件设置页"
+        if any(key in _RESTART_REQUIRED_KEYS for key in changed_keys):
+            message = f"{message}；部分变更重启后生效"
+
+        return True, message, self._redact_config_for_response(self.plugin_config.to_dict())

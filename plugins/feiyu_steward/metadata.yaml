@@ -1,0 +1,8 @@
+name: feiyu_steward
+display_name: 肥鱼兴趣与群聊管家
+desc: 兴趣分享、分群轻聊、主人身份核验、群风险私聊提醒、记忆与媒体能力协作。
+version: 1.0.68
+author: local
+astrbot_version: ">=4.29.1"
+support_platforms:
+  - aiocqhttp

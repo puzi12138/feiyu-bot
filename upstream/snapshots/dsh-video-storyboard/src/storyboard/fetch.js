@@ -1,0 +1,535 @@
+/**
+ * fetch.js — 「URL → 本地文件」的那一层，以及 zoom 用的高清直链。
+ *
+ * 设计前提（都在真机上量过，不是推测）：
+ *
+ *  1. **必须落盘一份低清全片**。`pick:'sharp'` 每段要 3 个候选帧，9 段就是 27 次随机 seek。
+ *     实测同一条视频：本地 27 次 9.6s，HTTP 直链 51.8s。那 7MB 是"后面随便跳"的入场费。
+ *  2. **高清只在 zoom 时取帧**，一次 2–6 帧，不落盘。
+ *  3. **必须登录**。同一条视频匿名只有 480P、登录有 1080P，而且**那一档根本不在列表里**——
+ *     模型不会收到任何信号，只会以为自己看的是高清。所以默认拒绝无 cookie 调用。
+ *  4. 插件**不打包 yt-dlp**，只调用用户自己装的那个（`docs/设计 §9.5` 已拍板）。
+ *
+ * 这一层只负责"把东西弄到本地"和"记下能拿到什么"，不碰扫描/取帧。
+ */
+
+import {
+  access, mkdir, readFile, readdir, rename, rm, stat, writeFile,
+} from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+import { DEFAULT_FFMPEG, probeVideo } from './probe.js';
+// 拿不到绝对路径就不传 `--ffmpeg-location`，所以要能再解析一次（会话中途装了 ffmpeg 也算数）
+import { resolveMediaBinary } from './binaries.js';
+import {
+  DEFAULT_UA, discoverYtdlp, explainYtdlpError, formatSelector, resolveAuth, runProcess,
+  summariseInfo, unwrapSingle,
+} from './ytdlp.js';
+import {
+  fileExists, freeBytes, mediaDir, mediaKey, mediaMaxBytes, pruneMedia,
+} from './media-store.js';
+import { assertFetchableUrl, isHttpUrl, normalizeUrl } from './url.js';
+import { directFromSummary, recallDirect, rememberDirect } from './direct-url.js';
+
+/**
+ * 下载目录里出现 `video.*` 的不一定是画面轨：B 站的 DASH 源会给出 `video.f30280.m4a`
+ * 这种纯音频轨。文件名不能当容器证据（PR #8 的教训），但**扩展名足以判断"这是不是音频"**——
+ * 把 m4a 改名成 video.mp4 才是真正的静默坏数据，宁可在这里报错。
+ */
+const AUDIO_EXTS = new Set(['.m4a', '.m4b', '.mp3', '.aac', '.opus', '.ogg', '.oga', '.wav', '.flac', '.weba']);
+
+/**
+ * 跑一次外部命令（只给合并用）。`execFile` 不用 shell，路径里有空格/中文也不会被拆。
+ * 失败时把 stderr 带进 Error.message —— ffmpeg 的原因全在那里。
+ */
+const runFile = promisify(execFile);
+
+/**
+ * 自己把 DASH 的音频轨合进视频里。
+ *
+ * 为什么不让 yt-dlp 去合：它要自己找到 ffmpeg，找不到就**静默降级成只下视频**
+ * （一行 warning，连退出码都是 0）。而 ffmpeg 本来就是我们自己的依赖 —— 路径就在手上，
+ * 与其把成败押在 yt-dlp 的搜索路径上，不如它下完我们自己合（#43/#44 的根因就在这里）。
+ *
+ * `-c copy`：不重编码，几秒钟，也不掉画质。
+ *
+ * @param {{video:string, audio:string, out?:string, ffmpegPath?:string, timeoutMs?:number}} o
+ * @returns {Promise<string>} 合成后的文件路径
+ */
+export async function mergeAudioTracks({
+  video, audio, out, ffmpegPath = DEFAULT_FFMPEG, timeoutMs = 120_000,
+} = {}) {
+  if (!video || !audio) throw new TypeError('mergeAudioTracks needs { video, audio }');
+  const dest = out ?? `${video}.merged.mp4`;
+  await runFile(ffmpegPath, [
+    '-hide_banner', '-v', 'error', '-y',
+    '-i', video, '-i', audio,
+    // 只取第一条视频流 + 第一条音频流；显式 map 避免把封面图（mjpeg）也塞进去
+    '-map', '0:v:0', '-map', '1:a:0',
+    '-c', 'copy', '-movflags', '+faststart',
+    dest,
+  ], { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+  return dest;
+}
+
+/**
+ * 这份下载下来的副本，音轨到底是"源本来没有"还是"这次没合进去"？
+ *
+ * 判据以**磁盘证据**为准：yt-dlp 合流失败时会把 DASH 音轨留在旁边
+ * （`video.f30280.m4a`），这两个文件并排放着就是铁证 —— 不管 `-J` 的 formats 有没有带
+ * acodec、不管这条是刚下的还是从缓存里命中的。issue #43 的现象（清单说
+ * "no audio track: grid is visual only"，而目录里躺着 `video.f30280.m4a`）就是这个判据漏了。
+ *
+ * @param {string} dir 缓存目录
+ * @param {{localHasAudio?:boolean, sourceHasAudio?:boolean}} o
+ *   localHasAudio: 成品有没有音轨（probeVideo 的结果）；sourceHasAudio: 源站声明的
+ * @returns {Promise<{audioMissing:boolean, companionAudio:string[], reason:'unmerged-dash'|'silent-copy'|null}>}
+ */
+export async function audioEvidence(dir, { localHasAudio, sourceHasAudio } = {}) {
+  const names = await readdir(dir).catch(() => []);
+  const companionAudio = names.filter((name) => {
+    if (!name.startsWith('video.') || /\.(part|ytdl|temp)$/i.test(name)) return false;
+    const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
+    return AUDIO_EXTS.has(ext);
+  });
+  // 成品确认有音轨 = 没问题（旁边的残留音轨文件不代表这一次没合进去）
+  if (localHasAudio === true) {
+    return { audioMissing: false, companionAudio, reason: null };
+  }
+  // 成品没音轨、或者读不出来（ffprobe 失败）时：
+  //  - 旁边躺着 `video.<id>.m4a` → 合流没跑，铁证（yt-dlp 合流成功会删掉这两条输入流）
+  //  - 没有旁边的文件，但源站声明过有音轨 → 这次下的副本是静音的
+  const audioMissing = companionAudio.length > 0
+    || (localHasAudio === false && sourceHasAudio === true);
+  return {
+    audioMissing,
+    companionAudio,
+    reason: audioMissing ? (companionAudio.length > 0 ? 'unmerged-dash' : 'silent-copy') : null,
+  };
+}
+
+
+/**
+ * 把 URL 变成一份可以喂给现有管线的本地文件，并把"这条链接能拿到什么"记下来。
+ *
+ * @param {string} input  http(s) 链接
+ * @param {object} opts
+ * @param {number} [opts.scanHeight=360]   落盘用的清晰度上限
+ * @param {number} [opts.zoomHeight=1080]  只记录，供 zoom 用
+ * @param {string} [opts.cookies]
+ * @param {boolean} [opts.allowAnonymous=false]
+ * @param {string} [opts.ffmpegPath]  传给 yt-dlp 的 ffmpeg 路径（合流用）
+ * @param {{bin:string,prefix:string[]}} [opts.ytdlp]  测试注入，正常走发现逻辑
+ * @param {(p:object)=>void} [opts.onProgress]
+ * @returns {Promise<{path:string, source:object}>}
+ */
+export async function fetchMedia(input, opts = {}) {
+  const {
+    scanHeight = 360,
+    zoomHeight = 1080,
+    cookies,
+    allowAnonymous = false,
+    // yt-dlp 自己不会去 DSH 的 bin 目录找 ffmpeg；不告诉它路径时，DASH 的 `+ba` 合流
+    // 会静默失败，只留下 video.<id>.mp4 和 audio.<id>.m4a 两个文件。见 issue #18。
+    ffmpegPath = DEFAULT_FFMPEG,
+    env = process.env,
+    ytdlp,
+    onProgress,
+    run = runProcess,
+  } = opts;
+
+  const url = assertFetchableUrl(input);
+  const normalized = normalizeUrl(url);
+  const auth = await resolveAuth({ cookies, allowAnonymous, env });
+  const tool = ytdlp || await discoverYtdlp({ env, run });
+
+  // `DEFAULT_FFMPEG` 是模块加载那一刻的快照：用户在会话中间装了 ffmpeg、或者刚设了
+  // DSH_FFMPEG_PATH，这里必须能捡到。拿不到绝对路径就不传 `--ffmpeg-location`（传个裸名
+  // 等于没传），改为在下完货之后用**磁盘证据**把"音轨没合进去"说清楚。
+  const ffmpegAbs = isAbsolute(ffmpegPath) ? ffmpegPath : (resolveMediaBinary('ffmpeg', { env }) ?? null);
+
+  const key = mediaKey(normalized, scanHeight);
+  const dir = join(mediaDir(env), key);
+  const target = join(dir, 'video.mp4');
+
+  /**
+   * 用旁边的音轨文件把 video.mp4 补成有声的（`-c copy`，不重编码）。
+   * 成功返回新的 stat，失败/合不上返回 null —— 调用方据此决定"继续报丢音"还是"重新下载"。
+   */
+  const repairAudio = async (companion) => {
+    if (!companion?.length) return null;
+    const tmp = join(dir, 'video.merged.mp4');
+    try {
+      await mergeAudioTracks({
+        video: target, audio: join(dir, companion[0]), out: tmp,
+        ffmpegPath: ffmpegAbs || DEFAULT_FFMPEG,
+      });
+      const info = await probeVideo(tmp).catch(() => null);
+      if (!info?.hasAudio) {
+        await rm(tmp, { force: true }).catch(() => {});
+        return null;
+      }
+      await rename(tmp, target);
+      await rm(join(dir, companion[0]), { force: true }).catch(() => {});
+      return await stat(target);
+    } catch (e) {
+      await rm(tmp, { force: true }).catch(() => {});
+      if (process.env.DSH_VIDEO_DEBUG) console.error('[fetch] merge failed:', e?.message ?? e);
+      return null;
+    }
+  };
+
+  // ---- 命中：连 meta.json 一起读回来，否则 source 会缺 maxAvailable/zoomTarget
+  if (await fileExists(target)) {
+    const st = await stat(target);
+    if (st.size > 0) {
+      let meta = null;
+      try {
+        meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8'));
+      } catch { /* 老缓存没有 meta，退回最小信息 */ }
+      // 旧版本（或无 ffmpeg 的环境）可能把 video-only 的 mp4 缓存下来。
+      // 现在的顺序是：**先就地补合**（音轨可能还在旁边，几秒就能修好，不用重下 26MB），
+      // 合不上再走"用当前 ffmpeg 失效重下"；同一个 ffmpeg 仍合不上就把 audioMergeRetry
+      // 记进 meta，避免每次重下。
+      const cachedDirect0 = recallDirect(normalized, zoomHeight);
+      const cachedInfo0 = await probeVideo(target).catch(() => null);
+      const ev0 = await audioEvidence(dir, {
+        localHasAudio: cachedInfo0?.hasAudio,
+        sourceHasAudio: meta?.audioMissing === true ? true : undefined,
+      });
+      let repaired = false;
+      let stNow = st;
+      if (ev0.audioMissing && ev0.companionAudio.length > 0) {
+        const fixed = await repairAudio(ev0.companionAudio);
+        if (fixed) {
+          repaired = true;
+          stNow = fixed;
+          // 修好了就把"丢音"的标记从 meta 里摘掉（留着会让下次再走失效重下）
+          meta = { ...(meta ?? {}), audioMerged: true };
+          delete meta.audioMissing;
+          delete meta.audioMergeRetry;
+          await writeFile(join(dir, 'meta.json'), JSON.stringify({ ...meta, cached: false }, null, 0), 'utf8')
+            .catch(() => {});
+          onProgress?.({ phase: 'cache-repaired', path: target, reason: 'audio' });
+        }
+      }
+      const staleMerge = !repaired && Boolean(
+        meta?.audioMissing && ffmpegAbs && meta.audioMergeRetry !== ffmpegAbs,
+      );
+      if (staleMerge) {
+        onProgress?.({ phase: 'cache-invalid', path: target, reason: 'audio-missing' });
+        await rm(target, { force: true }).catch(() => {});
+        await rm(join(dir, 'meta.json'), { force: true }).catch(() => {});
+      } else {
+        const cachedDirect = cachedDirect0;
+        onProgress?.({ phase: 'cache-hit', path: target });
+        // 缓存命中也得重新判一次音轨：老版本写的 meta 里根本没有 audioMissing 这一项，
+        // 直接信它就会把"音轨没合进去"报成"这片子没声音"（#43 就是踩在这上面）。
+        // 代价只有一次本地 ffprobe（~50ms），换掉的是"整条音频链无声且说不出原因"。
+        const cachedEvidence = repaired
+          ? { audioMissing: false, reason: null }
+          : ev0;
+        return {
+          path: target,
+          frameSource: cachedDirect
+            ? { uri: cachedDirect.url, userAgent: cachedDirect.userAgent, referer: cachedDirect.referer, height: cachedDirect.height, expiresAt: cachedDirect.expiresAt }
+            : null,
+          source: {
+            kind: 'url',
+            url,
+            bytes: stNow.size,
+            scanHeight,
+            ...(meta ?? {}),
+            ...(cachedEvidence.audioMissing ? { audioMissing: true } : {}),
+            ...(cachedEvidence.reason ? { audioMissingReason: cachedEvidence.reason } : {}),
+            ...(repaired ? { audioMerged: true } : {}),
+            // `cached` 必须排在展开之后：meta.json 里存的是写入那一刻的 false，会把这里覆盖掉
+            cached: true,
+          },
+        };
+      }
+    }
+  }
+
+  // ---- 解析
+  onProgress?.({ phase: 'resolve', url });
+  const { summary, authKind, warning: authNote, raw: info } = await probeSummary({ url, auth, tool, env, run });
+
+  // 顺手把 zoom 要用的高清直链挑出来并记住 —— formats 已经在手里了，这一步零成本。
+  // 否则 zoom 会再跑一次 `-J`（2.4 s），而它每次都紧跟在这个调用后面。
+  const zoomDirect = directFromSummary(summary, zoomHeight);
+  if (zoomDirect) rememberDirect(normalized, zoomHeight, zoomDirect);
+
+  // ---- 空间检查（下载前，按估算大小拒绝，不静默降质）
+  const wantHeight = summary.heights.length > 0
+    ? summary.heights.filter((h) => h <= scanHeight).at(-1) ?? summary.heights[0]
+    : null;
+  const wanted = Number.isFinite(Number(info?.filesize_approx))
+    ? Number(info.filesize_approx)
+    : null;
+  if (wanted) {
+    const free = await freeBytes();
+    if (free !== null && wanted * 1.5 > free) {
+      throw new Error(
+        `not enough disk space: need about ${(wanted / 1048576).toFixed(0)} MB ` +
+        `(+50% headroom), only ${(free / 1048576).toFixed(0)} MB free`,
+      );
+    }
+  }
+
+  // ---- 下载
+  await mkdir(dir, { recursive: true });
+  onProgress?.({ phase: 'download', height: wantHeight });
+  const dlArgs = [
+    '-f', formatSelector(scanHeight),
+    // 按"短边"就近取：竖屏视频的 res 是宽（360/480/720），不是 height。
+    ...(Number.isFinite(scanHeight) && scanHeight > 0 ? ['-S', `res:${Math.round(scanHeight)}`] : []),
+    // DSH 桌面版常把 ffmpeg 放在 $DSH_HOME/bin 而不进 PATH；yt-dlp 只认 PATH 或这个参数。
+    ...(ffmpegAbs ? ['--ffmpeg-location', ffmpegAbs] : []),
+    // **不要 --no-warnings**：yt-dlp 找不到 ffmpeg 时只打一行 warning 就**静默降级成只下视频**，
+    // 关掉警告等于把唯一的现场证据扔掉（#43/#44 都是这么"什么错都不报"的）。
+    // 警告不刷屏：只在音轨缺失时才取出来写进清单。
+    '--no-playlist', '--no-progress',
+    // 断点续传：网络抖了下次接着下，而不是从头再来
+    '--continue',
+    // CDN 抖动很常见（站点风控尤其），默认只重试 10 次整包，分片不重试
+    '--retries', '3', '--fragment-retries', '5',
+    '--merge-output-format', 'mp4',
+    '-o', join(dir, 'video.%(ext)s'),
+  ];
+  if (auth.cookiesPath) dlArgs.push('--cookies', auth.cookiesPath);
+  dlArgs.push(url);
+
+  let downloaded = await run(tool, dlArgs, { timeoutMs: 600_000 });
+
+  // 风控 / 限流（412 / 429 / 567）：带一个**正常的浏览器请求**再试一次 ——
+  // 用浏览器 UA，Referer 指向**这个 URL 自己的源站**（防盗链检查的就是"是不是从本站点的页面点进来的"）。
+  // 不去猜任何站点的风控算法，也不换代理、不轮换账号：就是一次普通重试，失败就如实报出来。
+  if (downloaded.code !== 0 && /HTTP Error (?:412|429|567)/i.test(downloaded.stderr ?? '')) {
+    let referer = null;
+    try { const u = new URL(url); referer = `${u.protocol}//${u.host}/`; } catch { /* 不是 http(s)，跳过 */ }
+    const retryArgs = dlArgs.slice(0, -1).concat([
+      ...(referer ? ['--add-header', `Referer:${referer}`] : []),
+      '--user-agent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/124.0.0.0 Safari/537.36',
+      '--sleep-requests', '1',
+      dlArgs[dlArgs.length - 1],
+    ]);
+    downloaded = await run(tool, retryArgs, { timeoutMs: 600_000 });
+  }
+
+  if (downloaded.code !== 0) {
+    // **不要删目录**：yt-dlp 的 .part 是断点续传的本钱。
+    // 原来这里 `rm -rf` 掉整个缓存目录，于是网络一抖就"下到一半清零、从头再来"——
+    // 用户实测表现为"越下越慢"（繁星-夏夜反馈）。残留的 .part 由 pruneMedia 按时间清。
+    throw new Error(explainYtdlpError(downloaded.stderr, downloaded.code));
+  }
+  // yt-dlp 有时会把 DASH 流写成 video.f100022.mp4（格式 id 进了文件名），
+  // 而不是 --merge-output-format 期望的 video.mp4。文件名不是容器判定的依据：
+  // 取目录里实际产出、最大的那个视频文件，收敛到稳定的 video.mp4 再交给管线。
+  let st = await stat(target).catch(() => null);
+  if (!st || st.size === 0) {
+    const candidates = [];
+    const audioOnly = [];
+    for (const name of await readdir(dir).catch(() => [])) {
+      if (!name.startsWith('video.') || /\.(part|ytdl|temp)$/i.test(name)) continue;
+      const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
+      try {
+        const info = await stat(join(dir, name));
+        if (!info.isFile() || info.size === 0) continue;
+        if (AUDIO_EXTS.has(ext)) { audioOnly.push(name); continue; }
+        candidates.push({ path: join(dir, name), size: info.size, ext });
+      } catch { /* 半成品被并发删除 */ }
+    }
+    if (candidates.length === 0) {
+      if (audioOnly.length > 0) {
+        throw new Error(
+          `yt-dlp produced audio only (${audioOnly.join(', ')}): ` +
+          'this link gave no video stream to scan. Try again without --allow-anonymous, ' +
+          'or pass a local file path.',
+        );
+      }
+      throw new Error('yt-dlp reported success but produced no file');
+    }
+    candidates.sort((a, b) => {
+      const amp = a.ext === '.mp4' ? 1 : 0;
+      const bmp = b.ext === '.mp4' ? 1 : 0;
+      return bmp - amp || b.size - a.size;
+    });
+    await rm(target, { force: true });
+    await rename(candidates[0].path, target);
+    st = await stat(target);
+  }
+  // 目标清晰度：请求的和实际能给的取小 —— 这正是"片源判断"要留在清单里的东西
+  const zoomTarget = summary.heights.length > 0
+    ? Math.min(zoomHeight, summary.maxHeight ?? zoomHeight)
+    : zoomHeight;
+
+  // 匿名/低档位拿到的副本可能**没有音轨**（B 站最低档只有画面），
+  // 于是整条音频链沉默（transcript=no-audio、meanLufs=null），用户以为是插件坏了。
+  // 这里明确区分"源本来就没声音"和"这次下载的副本没声音"（xingyueDanYang 报的观察）。
+  const sourceHasAudio = (summary.formats ?? []).some((f) => f.acodec && f.acodec !== 'none');
+  const localInfo = await probeVideo(target).catch(() => null);
+  // 判据以**磁盘证据**为准（旁边有没有留下音轨文件），`summary.formats` 只是辅助：
+  // 缓存命中 / 直链路径 / 老版本写的 meta 里都可能拿不到 acodec，光看它会漏判成
+  // "这条片子本来就没声音"（#43 的现象就是这样）。
+  const evidence0 = await audioEvidence(dir, { localHasAudio: localInfo?.hasAudio, sourceHasAudio });
+  let { audioMissing, companionAudio, reason: audioMissingReason } = evidence0;
+
+  // ---- 合流补救：yt-dlp 没合上（多半是它找不到 ffmpeg），但我们自己就有 ffmpeg。
+  // 它已经把两条流都下下来了，`-c copy` 几秒钟就能拼好 —— 不该让用户"再下一个带声音的喂本地文件"。
+  let mergedAudio = false;
+  if (audioMissing && companionAudio.length > 0) {
+    const fixed = await repairAudio(companionAudio);
+    if (fixed) {
+      st = fixed;
+      mergedAudio = true;
+      audioMissing = false;
+      audioMissingReason = null;
+      companionAudio = [];
+      onProgress?.({ phase: 'audio-merged', path: target });
+    }
+  }
+  // yt-dlp 的 warning 只在"音轨真的缺了"时才写进清单 —— 平时它太吵（提取器回退之类）
+  const audioWarnings = audioMissing
+    ? String(downloaded.stderr ?? '').split('\n').filter((l) => /warn|ffmpeg|merg/i.test(l))
+      .map((l) => l.trim()).filter(Boolean).slice(0, 3)
+    : [];
+
+  const source = {
+    kind: 'url',
+    ...(audioMissing ? { audioMissing: true } : {}),
+    ...(audioMissingReason ? { audioMissingReason } : {}),
+    // 自己合流补回来的：清单要说一句，否则用户会以为"这条片子本来就没声音"
+    ...(mergedAudio ? { audioMerged: true } : {}),
+    ...(audioWarnings.length > 0 ? { audioWarnings } : {}),
+    // 让下一次命中知道"这份坏缓存已经用哪个 ffmpeg 重试过"；换了 ffmpeg 才值得再试。
+    ...(audioMissing && isAbsolute(ffmpegAbs) ? { audioMergeRetry: ffmpegAbs } : {}),
+    url,
+    cached: false,
+    bytes: st.size,
+    scanHeight,
+    scanActual: wantHeight,
+    maxAvailable: summary.maxHeight,
+    availableHeights: summary.heights,
+    zoomTarget,
+    title: summary.title,
+    duration: summary.duration,
+    auth: authKind,
+    // 站点自己声明的登录门槛（subtitle / paywalled）—— 清单据此要求用户提供 cookies
+    ...(Array.isArray(summary.loginGates) && summary.loginGates.length > 0
+      ? { needLogin: summary.loginGates } : {}),
+    // 只有"匿名 + 确实拿不到目标档"才说一句。匿名但够高清时闭嘴 ——
+    // 早期版本无条件报错，实测把"匿名本来就有 1080P"的视频也拦了，纯属帮倒忙。
+    ...((authKind === 'anonymous' && zoomTarget < zoomHeight) || authNote
+      ? { authWarning: authNote ?? auth.warning } : {}),
+    ...(zoomTarget < zoomHeight ? { degraded: [`source-max-${summary.maxHeight ?? '?'}p`] } : {}),
+  };
+
+  // 落一份元信息，让"第二次看同一条链接"不用再解析（-J 要 2.4 s）。
+  // 里面**没有直链**：那是带签名的凭证，只活在进程内存里。
+  await writeFile(join(dir, 'meta.json'), JSON.stringify(source, null, 0), 'utf8').catch(() => {});
+
+  await pruneMedia({ dir: mediaDir(env), maxBytes: mediaMaxBytes(env) });
+  onProgress?.({ phase: 'done', bytes: st.size });
+
+  return {
+    path: target,
+    // frameSource 只进管线，**不进 manifest** —— 直链是带签名的临时凭证
+    frameSource: zoomDirect
+      ? { uri: zoomDirect.url, userAgent: zoomDirect.userAgent, referer: zoomDirect.referer, height: zoomDirect.height, expiresAt: zoomDirect.expiresAt }
+      : null,
+    source,
+  };
+}
+
+/* ------------------------------------------------------------------ 只探测不下载 */
+
+/**
+ * 链接版的 probe：只跑 `-J`，**不下载**。
+ * 让模型在花掉 7 MB 和 10 秒之前，先知道"这条多长、最高能到多少"。
+ * @returns {Promise<{url:string, title:string|null, duration:number|null,
+ *                    heights:number[], maxHeight:number|null, auth:string}>}
+ */
+
+/**
+ * 带 cookies 探测，并处理"有 cookies 反而更少"的真实事故：
+ * 过期/低权限的 SESSDATA 会让 B 站降级，实测同一支视频带 cookies 只有 480p、匿名却有 1080p。
+ * 只在 maxHeight ≤ 720 时多探一次（可疑才付这 3–5 秒）。
+ *
+ * @returns {{summary:object, authKind:string, warning?:string}}
+ */
+async function probeSummary({ url, auth, tool, env, run }) {
+  const args = ['-J', '--no-warnings', '--no-playlist'];
+  const out = {};
+  if (auth.cookiesPath) args.push('--cookies', auth.cookiesPath);
+  args.push(url);
+  const probed = await run(tool, args, { timeoutMs: 90_000 });
+  if (probed.code !== 0) throw new Error(explainYtdlpError(probed.stderr, probed.code));
+  let info;
+  try {
+    info = JSON.parse(probed.stdout);
+  } catch {
+    throw new Error('yt-dlp returned unparsable JSON while probing this link');
+  }
+  const summary = summariseInfo(unwrapSingle(info, url));
+  const raw = unwrapSingle(info, url);
+  if (!auth.cookiesPath || !(summary.maxHeight > 0 && summary.maxHeight <= 720)) {
+    return { summary, authKind: auth.kind, raw };
+  }
+  try {
+    const anon = await run(tool, ['-J', '--no-warnings', '--no-playlist', url], { timeoutMs: 90_000 });
+    if (anon.code !== 0) return { summary, authKind: auth.kind, raw };
+    const anonInfo = unwrapSingle(JSON.parse(anon.stdout), url);
+    const a = summariseInfo(anonInfo);
+    if (a.maxHeight <= summary.maxHeight) return { summary, authKind: auth.kind, raw };
+    return {
+      summary: { ...a, title: a.title || summary.title },
+      raw: anonInfo,
+      authKind: 'anonymous',
+      warning: 'cookies 只允许 ' + summary.maxHeight + 'p，匿名反而能拿到 ' + a.maxHeight + 'p' +
+        ' —— SESSDATA 可能过期或权限不足，建议重新导出 cookies.txt',
+    };
+  } catch {
+    return { summary, authKind: auth.kind, raw };   // 匿名探失败不影响主结果
+  }
+}
+
+export async function probeUrl(input, opts = {}) {
+  const {
+    cookies, allowAnonymous = false, env = process.env, ytdlp, run = runProcess,
+  } = opts;
+
+  const url = assertFetchableUrl(input);
+  const auth = await resolveAuth({ cookies, allowAnonymous, env });
+  const tool = ytdlp || await discoverYtdlp({ env, run });
+
+  const { summary, authKind, warning } = await probeSummary({ url, auth, tool, env, run });
+  return {
+    url,
+    title: summary.title,
+    duration: summary.duration,
+    heights: summary.heights,
+    maxHeight: summary.maxHeight,
+    auth: authKind,
+    ...(Array.isArray(summary.loginGates) && summary.loginGates.length > 0
+      ? { needLogin: summary.loginGates } : {}),
+    ...(warning ? { authWarning: warning } : {}),
+  };
+}
+
+/* ------------------------------------------------------------------ 统一入口 */
+
+/**
+ * pipeline 唯一要调的函数：本地路径原样返回，链接则换成本地文件。
+ * @returns {Promise<{path:string, source:object|null, frameSource:object|null}>}
+ */
+export async function resolveInput(input, opts = {}) {
+  if (!isHttpUrl(input)) return { path: input, source: null, frameSource: null };
+  const { path, source, frameSource } = await fetchMedia(input, opts);
+  return { path, source, frameSource };
+}
+

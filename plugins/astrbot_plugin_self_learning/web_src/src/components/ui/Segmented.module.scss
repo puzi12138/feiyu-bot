@@ -1,0 +1,29 @@
+@use "../../styles/tokens";
+
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  background: var(--surface-alt);
+  border-radius: var(--radius);
+
+  .material-icons {
+    font-size: 16px;
+    vertical-align: middle;
+  }
+
+  button {
+    padding: 6px 10px;
+    color: var(--muted);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+
+    &.active {
+      color: var(--accent, var(--primary));
+      background: var(--surface-solid);
+      box-shadow: var(--shadow-sm);
+    }
+  }
+}

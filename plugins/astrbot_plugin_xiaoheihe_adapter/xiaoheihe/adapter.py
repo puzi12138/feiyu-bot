@@ -1,0 +1,622 @@
+from __future__ import annotations
+
+from .feiyu_peak_bridge import (
+    automatic_peak_paused, automatic_scope, business_paused, candidate_scope,
+    feed_paused, feed_scope, register_event,
+)
+
+import asyncio
+import secrets
+import stat
+import sys
+import time
+from contextlib import suppress
+from pathlib import Path
+from typing import Any
+
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import Image, Plain
+from astrbot.api.platform import (
+    AstrBotMessage,
+    MessageMember,
+    MessageType,
+    Platform,
+    PlatformMetadata,
+    register_platform_adapter,
+)
+from astrbot.core.platform.astr_message_event import MessageSession
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+if sys.version_info >= (3, 14):
+    from pydantic import PrivateAttr
+else:
+    from pydantic.v1 import PrivateAttr
+
+from .api_client import RequestNotAuthorized
+from . import feiyu_recovery
+from .context_builder import BuiltContext, ContextBuilder
+from .event import XiaoheiheMessageEvent, aggregate_text
+from .feiyu_auto_reply_gate import authorize, block_event, reserve
+from .models import (
+    ContentOwnerRole,
+    EventState,
+    ImageAttribution,
+    Notification,
+    PermissionDecision,
+    RoutingTarget,
+)
+from .notification_service import NotificationService
+from .permission_service import PermissionService
+from .provider_routing import visual_chain_budget_seconds
+from .runtime import get_runtime
+
+MAX_EFFECTIVE_REPLY_TIMEOUT_SECONDS = 900
+MAX_IMAGE_PROVIDER_CANDIDATES = 3
+
+
+class _FeedEventImage(Image):
+    """Keep an in-memory proof of this event component's own materialization."""
+
+    _event_source_url: str = PrivateAttr(default="")
+    _event_materialized: object = PrivateAttr(default=None)
+
+    def __init__(self, url: str) -> None:
+        super().__init__(file=url, url=url)
+        self._event_source_url = url
+
+    async def convert_to_file_path(self) -> str:
+        # The proof is available only for the original HTTPS reference and
+        # only for the path returned by AstrBot's existing image resolver.
+        source = self._event_source_url
+        eligible = (self._event_materialized is None and source.startswith("https://")
+                    and self.file == source and self.url == source)
+        task = asyncio.current_task() if eligible else None
+        path = await super().convert_to_file_path()
+        if eligible and task is not None and task is asyncio.current_task():
+            try:
+                temp_dir = Path(get_astrbot_temp_path()).resolve(strict=True)
+                target = Path(path)
+                resolved = target.resolve(strict=True)
+                info = target.stat(follow_symlinks=False)
+                if (resolved.parent == temp_dir and target == resolved
+                        and resolved.name.startswith("media_image_")
+                        and not target.is_symlink() and stat.S_ISREG(info.st_mode)):
+                    self._event_materialized = (
+                        source, str(resolved), task, info.st_dev, info.st_ino,
+                        info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                    )
+            except (OSError, ValueError, RuntimeError):
+                # Failure to establish the proof must never change the native
+                # resolver result. The high-peak exception stays closed.
+                pass
+        return path
+
+
+def _bound_image_attributions(
+    context: BuiltContext,
+    notification: Notification,
+) -> list[ImageAttribution]:
+    """Return one explicit owner binding per image, including legacy contexts."""
+    if len(context.image_attributions) == len(context.image_urls):
+        return list(context.image_attributions)
+    sources = (
+        context.image_sources
+        if len(context.image_sources) == len(context.image_urls)
+        else ["event_image"] * len(context.image_urls)
+    )
+    result: list[ImageAttribution] = []
+    for source in sources:
+        if source == "current_comment":
+            result.append(
+                ImageAttribution(
+                    source=source,
+                    owner_uid=str(notification.sender_uid or "未知"),
+                    owner_nickname=str(notification.sender_nickname or "未知昵称"),
+                    owner_role=ContentOwnerRole.CURRENT_SENDER.value,
+                    owner_identity_key=notification.sender_identity_key,
+                )
+            )
+        elif source == "original_post":
+            result.append(
+                ImageAttribution(
+                    source=source,
+                    owner_uid=str(context.thread.author_uid or "未知"),
+                    owner_nickname=str(context.thread.author_name or "未知昵称"),
+                    owner_role=ContentOwnerRole.POST_AUTHOR.value,
+                    owner_identity_key=(
+                        f"post:{notification.profile_id}:{notification.post_id}:author"
+                    ),
+                )
+            )
+        else:
+            result.append(
+                ImageAttribution(
+                    source="event_image",
+                    owner_uid="未知",
+                    owner_nickname="未知昵称",
+                    owner_role=ContentOwnerRole.UNKNOWN.value,
+                )
+            )
+    return result
+
+
+def effective_reply_timeout_seconds(
+    *,
+    base_timeout_seconds: int,
+    image_count: int,
+    image_timeout_seconds: int,
+    image_total_timeout_seconds: int = 240,
+    image_provider_candidates: int = MAX_IMAGE_PROVIDER_CANDIDATES,
+    image_group_counts: tuple[int, ...] | list[int] | None = None,
+    provider_fallback_grace_seconds: int = 0,
+    context_timeout_seconds: int = 0,
+) -> int:
+    """Reserve independent context, vision, main-provider, and fallback budgets."""
+    base_timeout = max(5, int(base_timeout_seconds))
+    fallback_grace = max(0, min(300, int(provider_fallback_grace_seconds)))
+    context_budget = max(0, min(120, int(context_timeout_seconds)))
+    count = max(0, int(image_count))
+    if count == 0:
+        return min(
+            MAX_EFFECTIVE_REPLY_TIMEOUT_SECONDS,
+            base_timeout + fallback_grace + context_budget,
+        )
+    candidate_count = max(1, min(MAX_IMAGE_PROVIDER_CANDIDATES, int(image_provider_candidates)))
+    visual_budget = int(
+        visual_chain_budget_seconds(
+            image_count=count,
+            max_images=count,
+            image_timeout_seconds=image_timeout_seconds,
+            total_timeout_seconds=image_total_timeout_seconds,
+            provider_candidate_count=candidate_count,
+            image_group_counts=image_group_counts,
+        )
+    )
+    return min(
+        MAX_EFFECTIVE_REPLY_TIMEOUT_SECONDS,
+        base_timeout + fallback_grace + context_budget + visual_budget,
+    )
+
+
+def proactive_delivery_settings(config: dict[str, Any]) -> tuple[bool, bool]:
+    """Return the dry-run and review gates for one proactive event."""
+    return (
+        bool(config.get("dry_run", True)),
+        bool(config.get("review_required", True)),
+    )
+
+
+DEFAULT_PLATFORM_CONFIG = {
+    "id": "xiaoheihe",
+    "enable": False,
+    "profile_id": "default",
+}
+ADAPTER_LOGO_PATH = "../logo.png"
+
+
+@register_platform_adapter(
+    "xiaoheihe",
+    "小黑盒平台适配器",
+    default_config_tmpl=DEFAULT_PLATFORM_CONFIG,
+    adapter_display_name="小黑盒",
+    logo_path=ADAPTER_LOGO_PATH,
+    support_streaming_message=False,
+)
+class XiaoheihePlatformAdapter(Platform):
+    def __init__(
+        self,
+        platform_config: dict,
+        platform_settings: dict,
+        event_queue: asyncio.Queue,
+    ) -> None:
+        super().__init__(platform_config or {}, event_queue)
+        self.settings = platform_settings or {}
+        self._stop = asyncio.Event()
+        self._refresh = asyncio.Event()
+        self._service: NotificationService | None = None
+        self._context_builder: ContextBuilder | None = None
+        self._feed_task: asyncio.Task[Any] | None = None
+        self.running = False
+        self._refresh.set()
+
+    @property
+    def queue_length(self) -> int:
+        if self._service is None:
+            return 0
+        return self._service._queue.qsize()
+
+    def meta(self) -> PlatformMetadata:
+        return PlatformMetadata(
+            name="xiaoheihe",
+            description="小黑盒平台适配器",
+            id=str(self.config.get("id", "xiaoheihe")),
+            default_config_tmpl={**DEFAULT_PLATFORM_CONFIG, **self.config},
+            adapter_display_name="小黑盒",
+            logo_path=ADAPTER_LOGO_PATH,
+            support_streaming_message=False,
+        )
+
+    def request_refresh(self) -> None:
+        self._refresh.set()
+
+    async def run(self) -> None:
+        runtime = get_runtime()
+        await runtime.ensure_started()
+        runtime.register_adapter(self)
+        self.running = True
+        try:
+            while not self._stop.is_set():
+                await self._refresh.wait()
+                self._refresh.clear()
+                await self._stop_profile_services()
+                if self._stop.is_set():
+                    break
+                try:
+                    await self._start_profile_services()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    runtime.logging.emit(
+                        "ERROR",
+                        f"适配器后台服务启动失败: {exc}",
+                        profile_id=str(self.config.get("profile_id", "default")),
+                    )
+                refresh_wait = asyncio.create_task(self._refresh.wait())
+                stop_wait = asyncio.create_task(self._stop.wait())
+                done, pending = await asyncio.wait(
+                    {refresh_wait, stop_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    with suppress(asyncio.CancelledError):
+                        task.result()
+        finally:
+            self.running = False
+            await self._stop_profile_services()
+            runtime.unregister_adapter(self)
+
+    async def _start_profile_services(self) -> None:
+        runtime = get_runtime()
+        profile_id = str(self.config.get("profile_id", "default"))
+        profile = runtime.config.profile(profile_id)
+        if not profile.get("enabled", True):
+            runtime.logging.emit("INFO", "账号档案已禁用", profile_id=profile_id)
+            return
+        credentials = runtime.credentials.load(profile_id)
+        if credentials is None:
+            runtime.logging.emit(
+                "WARNING",
+                "账号尚未扫码登录，适配器保持待命",
+                profile_id=profile_id,
+            )
+            return
+        account = await runtime.repository.account_state(profile_id)
+        circuit_open_until = float(account.get("circuit_open_until") or 0)
+        if account.get("status") == "credential_invalid" or circuit_open_until > time.time():
+            runtime.logging.emit(
+                "WARNING",
+                "账号凭证失效或熔断仍在生效，适配器暂停网络任务",
+                profile_id=profile_id,
+                details={"circuit_open_until": circuit_open_until},
+            )
+            return
+        client = await runtime.get_client(profile_id)
+        config = runtime.config.snapshot()
+        context_config = config["context"]
+        self._context_builder = ContextBuilder(
+            max_post_chars=int(context_config["max_post_chars"]),
+            max_thread_comments=int(context_config["max_thread_comments"]),
+            thread_reply_post_chars=int(context_config["thread_reply_post_chars"]),
+            thread_reply_recent_comments=int(context_config["thread_reply_recent_comments"]),
+            max_images=int(context_config["max_images_per_event"]),
+            cache_ttl_seconds=int(context_config["context_cache_ttl_seconds"]),
+            cache_max_entries=int(context_config["context_cache_max_entries"]),
+        )
+        permissions = PermissionService(
+            config["permissions"],
+            owner_uid=str(profile.get("owner_uid", "")),
+            self_uid=credentials.uid,
+            only_explicit_mentions=bool(config["reply"]["only_explicit_mentions"]),
+            reply_to_direct_replies=bool(config["reply"]["reply_to_direct_replies"]),
+        )
+        self._service = NotificationService(
+            profile,
+            config,
+            client,
+            runtime.repository,
+            runtime.tasks,
+            runtime.logging,
+            permissions,
+            self._context_builder,
+            self._dispatch,
+        )
+        await runtime.tasks.start_profile_poller(profile_id, self._service.run())
+        proactive_config = config["proactive_feed"]
+        if proactive_config.get("enabled", False):
+            dry_run, review_required = proactive_delivery_settings(proactive_config)
+            if not dry_run and not review_required:
+                runtime.logging.emit(
+                    "WARNING",
+                    "主动刷帖无审核真实发送已启用，AI 回复将直接发表评论",
+                    profile_id=profile_id,
+                )
+            feed = runtime.feed_service(profile_id, client, self._dispatch_synthetic)
+            self._feed_task = await runtime.tasks.start(
+                f"xhh-feed-{profile_id}",
+                self._feed_loop(
+                    feed,
+                    int(proactive_config["interval_seconds"]),
+                    int(proactive_config["jitter_seconds"]),
+                ),
+                replace=True,
+            )
+
+    async def _feed_loop(self, feed, interval: int, jitter: int) -> None:
+        while not self._stop.is_set() and not self._refresh.is_set():
+            try:
+                # Enter the current native loop's guarded run_once first;
+                # its incident wrapper establishes the scope used inside it.
+                with automatic_scope(), feed_scope(self, feed) as feed_current:
+                    if feed_current:
+                        await feed.run_once()
+                        get_runtime().clear_proactive_circuit(str(self.config.get("profile_id", "default")))
+            except asyncio.CancelledError:
+                raise
+            except RequestNotAuthorized:
+                # The peak guard denied a request before dispatch.
+                pass
+            except Exception as exc:
+                get_runtime().report_proactive_circuit(
+                    str(self.config.get("profile_id", "default")),
+                    exc,
+                )
+                await asyncio.sleep(max(300, interval))
+            try:
+                jitter_ms = secrets.randbelow(max(0, jitter) * 1000 + 1)
+                delay = max(300, interval) + jitter_ms / 1000
+                await asyncio.wait_for(self._refresh.wait(), timeout=delay)
+            except TimeoutError:
+                continue
+
+    async def _stop_profile_services(self) -> None:
+        profile_id = str(self.config.get("profile_id", "default"))
+        runtime = get_runtime()
+        if self._service is not None:
+            await self._service.stop()
+            self._service = None
+        await runtime.tasks.cancel(f"xhh-poll-{profile_id}")
+        await runtime.tasks.cancel_prefix(f"xhh-worker-{profile_id}-")
+        await runtime.tasks.cancel(f"xhh-feed-{profile_id}")
+        if self._context_builder is not None:
+            await self._context_builder.clear()
+            self._context_builder = None
+        self._feed_task = None
+
+    async def _dispatch(
+        self,
+        event_id: int,
+        notification: Notification,
+        context: BuiltContext,
+        permission: PermissionDecision,
+        *,
+        capture_candidate: bool = False,
+        candidate_metadata: dict[str, Any] | None = None,
+        dry_run_override: bool | None = None,
+        proactive: bool = False,
+    ) -> None:
+        runtime = get_runtime()
+        if not await authorize(runtime.repository, event_id, notification.route, phase="dispatch"):
+            await block_event(runtime.repository, event_id, "dispatch_not_authorized")
+            return
+        runtime_config = runtime.config.snapshot()
+        client = await runtime.get_client(notification.profile_id)
+        credentials = client.credentials
+        if credentials is None:
+            raise RuntimeError("分发事件时账号凭证不存在")
+        message = AstrBotMessage()
+        message.type = MessageType.GROUP_MESSAGE
+        message.self_id = credentials.uid
+        message.session_id = notification.route.session_id
+        message.message_id = notification.message_id
+        message.group_id = notification.route.group_id
+        message.sender = MessageMember(
+            user_id=notification.sender_runtime_id,
+            nickname=notification.sender_nickname or "未知昵称",
+        )
+        components = [Plain(context.user_text)]
+        image_understanding_enabled = bool(runtime_config["context"]["enable_image_understanding"])
+        if image_understanding_enabled:
+            components.extend(
+                _FeedEventImage(url) if proactive else Image(file=url, url=url)
+                for url in context.image_urls
+            )
+        image_attributions = _bound_image_attributions(context, notification)
+        image_sources = [item.source for item in image_attributions]
+        base_reply_timeout = int(runtime_config["reply"]["reply_timeout_seconds"])
+        context_timeout_budget = (
+            int(runtime_config["context"].get("thread_reply_compression_timeout_seconds", 30))
+            if context.compression_source is not None
+            and bool(runtime_config["context"].get("enable_thread_reply_compression", True))
+            else 0
+        )
+        image_group_counts: dict[tuple[str, str, str, str], int] = {}
+        if image_understanding_enabled:
+            for attribution in image_attributions:
+                key = (
+                    attribution.source,
+                    attribution.owner_role,
+                    attribution.owner_uid,
+                    attribution.owner_nickname,
+                )
+                image_group_counts[key] = image_group_counts.get(key, 0) + 1
+        effective_reply_timeout = effective_reply_timeout_seconds(
+            base_timeout_seconds=base_reply_timeout,
+            image_count=len(context.image_urls) if image_understanding_enabled else 0,
+            image_timeout_seconds=int(runtime_config["context"]["image_timeout_seconds"]),
+            image_total_timeout_seconds=int(
+                runtime_config["context"].get("image_total_timeout_seconds", 240)
+            ),
+            image_group_counts=list(image_group_counts.values()),
+            provider_fallback_grace_seconds=int(
+                runtime_config["reply"].get("provider_fallback_grace_seconds", 60)
+            ),
+            context_timeout_seconds=context_timeout_budget,
+        )
+        message.message = components
+        message.message_str = context.user_text
+        message.timestamp = int(notification.created_at or time.time())
+        post_author_uid = str(context.thread.author_uid or notification.post_author_uid or "")
+        message.raw_message = {
+            "event_type": notification.event_type.value,
+            "incoming_event_id": event_id,
+            "proactive": bool(proactive),
+            "route": notification.route.as_dict(),
+            "external_event_id": notification.external_event_id,
+            "external_comment_id": notification.external_comment_id,
+            "sender_uid": str(notification.sender_uid),
+            "sender_uid_verified": notification.sender_uid_verified,
+            "sender_identity_key": notification.sender_identity_key,
+            "sender_runtime_id": notification.sender_runtime_id,
+            "sender_nickname": str(notification.sender_nickname),
+            "post_author_uid": post_author_uid,
+            "post_author_uid_verified": bool(post_author_uid),
+            "post_author_identity_key": (
+                f"post:{notification.profile_id}:{notification.post_id}:author"
+            ),
+            "post_author_nickname": str(context.thread.author_name),
+            "image_urls": list(context.image_urls),
+            "image_sources": image_sources,
+            "image_attributions": [item.as_dict() for item in image_attributions],
+            "reply_target_comment_id": context.reply_target_comment_id,
+            "explicit_post_reference": bool(context.explicit_post_reference),
+            "warnings": list(context.warnings),
+            "reply_timeout_base_seconds": base_reply_timeout,
+            "reply_timeout_context_seconds": context_timeout_budget,
+            "reply_timeout_effective_seconds": effective_reply_timeout,
+            "provider_fallback_grace_seconds": int(
+                runtime_config["reply"].get("provider_fallback_grace_seconds", 60)
+            ),
+        }
+        if "_feiyu_recovery" in notification.raw:
+            message.raw_message["feiyu_recovery"] = notification.raw["_feiyu_recovery"]
+        profile = runtime.config.profile(notification.profile_id)
+        dry_run = (
+            bool(profile.get("dry_run", True))
+            if dry_run_override is None
+            else bool(dry_run_override)
+        )
+        event = XiaoheiheMessageEvent(
+            message_str=message.message_str,
+            message_obj=message,
+            platform_meta=self.meta(),
+            session_id=message.session_id,
+            runtime=runtime,
+            route=notification.route,
+            event_id=event_id,
+            dry_run=dry_run,
+            proactive=proactive,
+            capture_candidate=capture_candidate,
+            candidate_metadata=candidate_metadata,
+            reply_timeout_seconds=effective_reply_timeout,
+        )
+        event.is_wake = True
+        event.is_at_or_wake_command = True
+        if permission.map_as_admin:
+            event.role = "admin"
+        event.set_extra("xiaoheihe_dynamic_context", context.dynamic_context)
+        event.set_extra("xiaoheihe_runtime_context", context.runtime_context)
+        event.set_extra("xiaoheihe_community_context", context.community_context)
+        event.set_extra("xiaoheihe_focus_context", context.focus_context)
+        event.set_extra("xiaoheihe_compression_source", context.compression_source)
+        event.set_extra("xiaoheihe_image_sources", image_sources)
+        event.set_extra(
+            "xiaoheihe_image_attributions",
+            [item.as_dict() for item in image_attributions],
+        )
+        event.set_extra("xiaoheihe_route", notification.route.as_dict())
+        fixed_llm_provider_id = str(runtime_config["providers"]["llm_provider_id"]).strip()
+        if fixed_llm_provider_id:
+            event.set_extra("selected_provider", fixed_llm_provider_id)
+        with register_event(self, event):
+            self.commit_event(event)
+            try:
+                await asyncio.wait_for(
+                    event.wait_finished(),
+                    timeout=event.reply_timeout_seconds,
+                )
+            except TimeoutError:
+                await event.expire()
+
+    async def _dispatch_synthetic(
+        self, notification: Notification, metadata: dict[str, Any]
+    ) -> None:
+        runtime = get_runtime()
+        if self._context_builder is None:
+            return
+        if "_feiyu_recovery_event_id" in metadata:
+            event_id = await feiyu_recovery.claimed_event(runtime.repository, notification, metadata)
+        else:
+            event_id = await runtime.repository.claim_event(notification)
+        if event_id is None:
+            return
+        with candidate_scope(self, notification, event_id):
+            allowed, reason, preserve = await reserve(runtime.repository, event_id, notification)
+            if not allowed:
+                if not preserve:
+                    await block_event(runtime.repository, event_id, reason)
+                return
+            try:
+                client = await runtime.get_client(notification.profile_id)
+                if not await authorize(runtime.repository, event_id, notification.route, phase="context"):
+                    await block_event(runtime.repository, event_id, "context_not_authorized")
+                    return
+
+                async def context_authorized() -> bool:
+                    return await authorize(runtime.repository, event_id, notification.route, phase="context")
+
+                context = await self._context_builder.build(
+                    notification, client, authorize=context_authorized,
+                )
+                await runtime.repository.mark_event(event_id, EventState.CONTEXT_READY)
+                await runtime.repository.record_session(notification.route)
+                await runtime.repository.mark_event(event_id, EventState.DISPATCHED)
+                feed_config = runtime.config.snapshot()["proactive_feed"]
+                dry_run, review_required = proactive_delivery_settings(feed_config)
+                await self._dispatch(
+                    event_id,
+                    notification,
+                    context,
+                    PermissionDecision(True, "主动帖子合成事件"),
+                    capture_candidate=review_required,
+                    candidate_metadata={
+                        **metadata,
+                        "post_author_uid": notification.post_author_uid,
+                    },
+                    dry_run_override=dry_run,
+                    proactive=True,
+                )
+            except RequestNotAuthorized:
+                await block_event(runtime.repository, event_id, "context_not_authorized")
+                return
+            except asyncio.CancelledError:
+                await block_event(runtime.repository, event_id, "processing_cancelled")
+                raise
+            except Exception:
+                await block_event(runtime.repository, event_id, "processing_failed")
+                raise
+
+    async def send_by_session(self, session: MessageSession, message_chain: MessageChain) -> None:
+        # A generic proactive send has no proven owner intent or reservation.
+        # Owner-requested comments use the separate authenticated steward tool.
+        raise ValueError("自动评论缺少已授权事件，不予发送")
+
+    async def terminate(self) -> None:
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self._refresh.set()
+        await self._stop_profile_services()
+        self.running = False

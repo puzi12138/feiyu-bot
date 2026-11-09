@@ -1,0 +1,1514 @@
+"""
+人格审查服务 - 处理人格更新审查相关业务逻辑
+"""
+import json
+import time
+import re
+from typing import Dict, Any, List, Tuple, Optional
+from datetime import datetime
+
+from astrbot.api import logger
+
+MAX_STYLE_BEGIN_DIALOG_PAIRS = 10
+STYLE_BEGIN_DIALOG_PREFIX = "[风格示范]"
+
+# Import update type constants
+try:
+    from ...utils.persona_selection import (
+        resolve_target_persona,
+        resolve_target_persona_from_web,
+    )
+    from ...statics.messages import (
+        UPDATE_TYPE_STYLE_LEARNING,
+        normalize_update_type,
+        get_review_source_from_update_type,
+    )
+except ImportError:
+    from utils.persona_selection import (
+        resolve_target_persona,
+        resolve_target_persona_from_web,
+    )
+    from statics.messages import (
+        UPDATE_TYPE_STYLE_LEARNING,
+        normalize_update_type,
+        get_review_source_from_update_type,
+    )
+
+
+def _optional_container_attr(container, name: str, default=None):
+    """Return optional container attributes without auto-creating Mock children."""
+    value = getattr(container, name, default)
+    if value is default:
+        return default
+    if value.__class__.__module__ == 'unittest.mock' and name not in getattr(container, '__dict__', {}):
+        return default
+    return value
+
+
+class PersonaReviewService:
+    """人格审查服务 - 整合三种人格审查来源"""
+
+    def __init__(self, container):
+        """
+        初始化人格审查服务
+
+        Args:
+            container: ServiceContainer 依赖注入容器
+        """
+        self.container = container
+        self.persona_updater = getattr(container, 'persona_updater', None)
+        self.database_manager = getattr(container, 'database_manager', None)
+        self.persona_manager = getattr(container, 'persona_manager', None)
+        self.persona_web_manager = _optional_container_attr(container, 'persona_web_manager')
+        self.plugin_config = _optional_container_attr(container, 'plugin_config')
+        group_mapping = _optional_container_attr(container, 'group_id_to_unified_origin', {})
+        self.group_id_to_unified_origin = group_mapping if isinstance(group_mapping, dict) else {}
+        # AstrBot框架PersonaManager（用于直接更新默认人格）
+        self.astrbot_persona_manager = (
+            _optional_container_attr(container, 'astrbot_persona_manager')
+            or self.persona_manager
+        )
+
+    def _resolve_umo(self, group_id: str) -> str:
+        """将group_id解析为unified_msg_origin以支持多配置文件"""
+        return self.group_id_to_unified_origin.get(group_id, group_id)
+
+    def _auto_apply_enabled(self) -> bool:
+        if not self.plugin_config:
+            return False
+
+        persona_updates_enabled = getattr(self.plugin_config, 'auto_apply_persona_updates', False)
+        legacy_approved_enabled = getattr(self.plugin_config, 'auto_apply_approved_persona', False)
+        return (
+            (persona_updates_enabled if isinstance(persona_updates_enabled, bool) else False)
+            or (legacy_approved_enabled if isinstance(legacy_approved_enabled, bool) else False)
+        )
+
+    @staticmethod
+    def _normalize_begin_dialogs(value: Any) -> List[str]:
+        """Normalize AstrBot begin_dialogs into a string list for diff/snapshot."""
+        if not value:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value if item is not None]
+        return [str(value)]
+
+    @classmethod
+    def _persona_snapshot_from_current(cls, current: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        current = current or {}
+        persona_id = (
+            current.get('persona_id')
+            or current.get('name')
+            or current.get('id')
+            or current.get('applied_persona_id')
+            or 'default'
+        )
+        persona_name = current.get('persona_name') or current.get('name') or persona_id
+        return {
+            'persona_id': str(persona_id),
+            'persona_name': str(persona_name),
+            'applied_persona_id': str(persona_id),
+            'applied_persona_name': str(persona_name),
+            'system_prompt': str(current.get('system_prompt') or current.get('prompt') or ''),
+            'begin_dialogs': cls._normalize_begin_dialogs(current.get('begin_dialogs')),
+            'group_id': current.get('group_id', 'default'),
+        }
+
+    @staticmethod
+    def _append_text_block(base_text: str, appended_text: str) -> str:
+        base = (base_text or '').strip()
+        appended = (appended_text or '').strip()
+        if base and appended:
+            return f"{base}\n\n{appended}"
+        return appended or base
+
+    @staticmethod
+    def _append_prompt(current_prompt: str, incremental_content: str) -> str:
+        return PersonaReviewService._append_text_block(current_prompt, incremental_content)
+
+    @staticmethod
+    def _compact_prompt_text(text: str) -> str:
+        return re.sub(r'\s+', '', text or '')
+
+    @classmethod
+    def _extract_incremental_prompt_content(cls, current_prompt: str, proposed_content: str) -> str:
+        """Keep persona-learning approvals from appending the full prompt twice."""
+        current = (current_prompt or '').strip()
+        proposed = (proposed_content or '').strip()
+        if not current or not proposed:
+            return proposed
+
+        if proposed == current:
+            return ''
+
+        if proposed.startswith(current):
+            return proposed[len(current):].strip()
+
+        compact_current = cls._compact_prompt_text(current)
+        compact_proposed = cls._compact_prompt_text(proposed)
+        if compact_current and compact_proposed == compact_current:
+            return ''
+        if compact_current and compact_proposed.startswith(compact_current):
+            current_index = 0
+            for index, char in enumerate(proposed):
+                if char.isspace():
+                    continue
+                if current_index >= len(compact_current):
+                    return proposed[index:].strip()
+                if char == compact_current[current_index]:
+                    current_index += 1
+                    if current_index == len(compact_current):
+                        return proposed[index + 1:].strip()
+                else:
+                    break
+
+        return proposed
+
+    @classmethod
+    def _append_incremental_prompt(cls, current_prompt: str, proposed_content: str) -> Tuple[str, str]:
+        incremental_content = cls._extract_incremental_prompt_content(
+            current_prompt,
+            proposed_content,
+        )
+        return cls._append_text_block(current_prompt, incremental_content), incremental_content
+
+    @staticmethod
+    def _affected_fields(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+        fields = []
+        if before.get('system_prompt', '') != after.get('system_prompt', ''):
+            fields.append('system_prompt')
+        if before.get('begin_dialogs', []) != after.get('begin_dialogs', []):
+            fields.append('begin_dialogs')
+        return fields
+
+    def _build_change_payload(
+        self,
+        before: Dict[str, Any],
+        after: Dict[str, Any],
+        *,
+        applied_at: Optional[float] = None,
+        review_id: str = '',
+        review_source: str = '',
+        group_id: str = '',
+        proposed_content: str = '',
+        application_mode: str = '',
+        style_dialog_pairs: Optional[List[Tuple[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        affected_fields = self._affected_fields(before, after)
+        if not application_mode:
+            if affected_fields == ['begin_dialogs']:
+                application_mode = 'append_begin_dialogs'
+            elif review_source == 'traditional':
+                application_mode = 'replace_system_prompt'
+            elif 'system_prompt' in affected_fields:
+                application_mode = 'append_system_prompt'
+            else:
+                application_mode = 'none'
+
+        return {
+            'review_id': str(review_id) if review_id else '',
+            'review_source': review_source,
+            'group_id': group_id or before.get('group_id', after.get('group_id', 'default')),
+            'applied_persona_id': after.get('persona_id') or after.get('applied_persona_id') or before.get('applied_persona_id', 'default'),
+            'applied_persona_name': after.get('persona_name') or after.get('applied_persona_name') or before.get('applied_persona_name', 'default'),
+            'applied_at': applied_at,
+            'target_fields': affected_fields,
+            'affected_fields': affected_fields,
+            'application_mode': application_mode,
+            'before_system_prompt': before.get('system_prompt', ''),
+            'after_system_prompt': after.get('system_prompt', ''),
+            'before_begin_dialogs': self._normalize_begin_dialogs(before.get('begin_dialogs')),
+            'after_begin_dialogs': self._normalize_begin_dialogs(after.get('begin_dialogs')),
+            'proposed_content': proposed_content or '',
+            'style_dialog_pairs': [
+                {'user': user_msg, 'assistant': assistant_msg}
+                for user_msg, assistant_msg in (style_dialog_pairs or [])
+            ],
+        }
+
+    @staticmethod
+    def _extract_style_dialog_pairs(review: Dict[str, Any]) -> List[Tuple[str, str]]:
+        """Extract style review dialog pairs from structured patterns or few-shot text."""
+        dialog_pairs = []
+        learned_patterns = review.get('learned_patterns', [])
+        for pattern in learned_patterns:
+            situation = pattern.get('situation', '') if isinstance(pattern, dict) else ''
+            expression = pattern.get('expression', '') if isinstance(pattern, dict) else ''
+            if situation and expression:
+                dialog_pairs.append((str(situation), str(expression)))
+
+        if not dialog_pairs:
+            dialog_pairs = PersonaReviewService._parse_few_shots_to_pairs(
+                review.get('few_shots_content', '') or ''
+            )
+        return dialog_pairs
+
+    def _dialog_pairs_for_style_review(self, review: Dict[str, Any]) -> List[Tuple[str, str]]:
+        return self._extract_style_dialog_pairs(review)
+
+    @staticmethod
+    def _build_style_begin_dialogs(
+        current_begin_dialogs: List[str],
+        dialog_pairs: List[Tuple[str, str]]
+    ) -> List[str]:
+        """Append style examples and keep only latest style example pairs."""
+        updated_dialogs = PersonaReviewService._normalize_begin_dialogs(current_begin_dialogs)
+
+        for user_msg, assistant_msg in dialog_pairs:
+            updated_dialogs.append(f"{STYLE_BEGIN_DIALOG_PREFIX}{user_msg}")
+            updated_dialogs.append(str(assistant_msg))
+
+        style_indices = []
+        idx = 0
+        while idx < len(updated_dialogs):
+            if str(updated_dialogs[idx]).startswith(STYLE_BEGIN_DIALOG_PREFIX) and idx + 1 < len(updated_dialogs):
+                style_indices.append(idx)
+                idx += 2
+            else:
+                idx += 1
+
+        if len(style_indices) > MAX_STYLE_BEGIN_DIALOG_PAIRS:
+            remove_count = len(style_indices) - MAX_STYLE_BEGIN_DIALOG_PAIRS
+            indices_to_remove = set()
+            for remove_idx in style_indices[:remove_count]:
+                indices_to_remove.add(remove_idx)
+                indices_to_remove.add(remove_idx + 1)
+            updated_dialogs = [
+                dialog for i, dialog in enumerate(updated_dialogs)
+                if i not in indices_to_remove
+            ]
+
+        return updated_dialogs
+
+    @staticmethod
+    def _apply_style_pairs_to_begin_dialogs(
+        begin_dialogs: List[Any],
+        dialog_pairs: List[Tuple[str, str]],
+    ) -> List[str]:
+        return PersonaReviewService._build_style_begin_dialogs(begin_dialogs, dialog_pairs)
+
+    async def _get_current_persona_snapshot(self, group_id: str) -> Dict[str, Any]:
+        """Read current persona fields needed for preview and persistent snapshots."""
+        fallback = self._persona_snapshot_from_current({'group_id': group_id})
+
+        try:
+            current_persona = None
+            if self.persona_web_manager:
+                current_persona = await resolve_target_persona_from_web(
+                    self.persona_web_manager,
+                    self.plugin_config,
+                    group_id,
+                    log=logger,
+                )
+            elif self.astrbot_persona_manager:
+                current_persona = await resolve_target_persona(
+                    self.astrbot_persona_manager,
+                    self.plugin_config,
+                    self._resolve_umo(group_id),
+                    require_existing=True,
+                    log=logger,
+                )
+
+            if not isinstance(current_persona, dict):
+                return fallback
+
+            snapshot = self._persona_snapshot_from_current(current_persona)
+            snapshot['group_id'] = group_id
+            return snapshot
+        except Exception as e:
+            logger.warning(f"获取群组 {group_id} 人格快照失败: {e}", exc_info=True)
+            fallback['system_prompt'] = f"[获取当前人格失败: {str(e)}]"
+            return fallback
+
+    async def _build_change_preview(
+        self,
+        *,
+        review_id: str,
+        review_source: str,
+        group_id: str,
+        proposed_content: str = '',
+        current_snapshot: Optional[Dict[str, Any]] = None,
+        style_review: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build before/after persona preview for pending or approved reviews."""
+        before = current_snapshot or await self._get_current_persona_snapshot(group_id)
+        before = self._persona_snapshot_from_current(before)
+        before['group_id'] = group_id
+
+        style_dialog_pairs = []
+        after = dict(before)
+        application_mode = 'none'
+
+        if review_source == 'style_learning':
+            style_dialog_pairs = self._extract_style_dialog_pairs(style_review or {})
+            after['begin_dialogs'] = self._build_style_begin_dialogs(
+                before.get('begin_dialogs', []),
+                style_dialog_pairs,
+            )
+            application_mode = 'append_begin_dialogs'
+        elif review_source == 'traditional':
+            after['system_prompt'] = proposed_content or ''
+            application_mode = 'replace_system_prompt'
+        elif review_source == 'persona_learning':
+            after['system_prompt'], proposed_content = self._append_incremental_prompt(
+                before.get('system_prompt', ''),
+                proposed_content,
+            )
+            application_mode = 'append_system_prompt'
+        else:
+            after['system_prompt'] = self._append_text_block(
+                before.get('system_prompt', ''),
+                proposed_content,
+            )
+            application_mode = 'append_system_prompt'
+
+        return self._build_change_payload(
+            before,
+            after,
+            review_id=review_id,
+            review_source=review_source,
+            group_id=group_id,
+            proposed_content=proposed_content,
+            application_mode=application_mode,
+            style_dialog_pairs=style_dialog_pairs,
+        )
+
+    async def _save_change_snapshot(
+        self,
+        review_source: str,
+        review_id: str,
+        change_payload: Dict[str, Any],
+    ) -> None:
+        if not self.database_manager or not hasattr(self.database_manager, 'save_persona_change_snapshot'):
+            return
+        snapshot = {
+            **change_payload,
+            'review_source': review_source,
+            'review_id': str(review_id),
+            'applied_at': change_payload.get('applied_at') or time.time(),
+        }
+        try:
+            await self.database_manager.save_persona_change_snapshot(snapshot)
+        except Exception as e:
+            logger.warning(f"保存人格变更快照失败: {e}", exc_info=True)
+
+    async def _load_change_snapshot(
+        self,
+        review_source: str,
+        review_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not self.database_manager or not hasattr(self.database_manager, 'get_persona_change_snapshot'):
+            return None
+        try:
+            return await self.database_manager.get_persona_change_snapshot(
+                review_source, str(review_id)
+            )
+        except Exception as e:
+            logger.debug(f"读取人格变更快照失败: {e}")
+            return None
+
+    async def _persona_learning_preview(
+        self,
+        group_id: str,
+        incremental_content: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return await self._build_change_preview(
+                review_id='',
+                review_source='persona_learning',
+                group_id=group_id,
+                proposed_content=incremental_content,
+            )
+        except Exception as e:
+            logger.debug(f"生成人格学习预览失败: {e}")
+            return None
+
+    async def _traditional_preview(
+        self,
+        group_id: str,
+        new_content: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return await self._build_change_preview(
+                review_id='',
+                review_source='traditional',
+                group_id=group_id,
+                proposed_content=new_content,
+            )
+        except Exception as e:
+            logger.debug(f"生成传统人格预览失败: {e}")
+            return None
+
+    async def _style_preview(
+        self,
+        group_id: str,
+        review: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            return await self._build_change_preview(
+                review_id=f"style_{review.get('id', '')}",
+                review_source='style_learning',
+                group_id=group_id,
+                proposed_content=review.get('few_shots_content', '') or '',
+                style_review=review,
+            )
+        except Exception as e:
+            logger.debug(f"生成风格审查预览失败: {e}")
+            return None
+
+    @staticmethod
+    def _metadata_change_snapshot(review: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        metadata = review.get('metadata') if isinstance(review, dict) else {}
+        if not isinstance(metadata, dict):
+            return None
+        snapshot = metadata.get('change_snapshot')
+        return snapshot if isinstance(snapshot, dict) else None
+
+    async def _store_persona_learning_snapshot(
+        self, review_id: int, snapshot: Dict[str, Any]
+    ) -> None:
+        if not self.database_manager or not hasattr(self.database_manager, 'update_persona_learning_review_metadata'):
+            return
+        try:
+            await self.database_manager.update_persona_learning_review_metadata(
+                review_id,
+                {'change_snapshot': snapshot}
+            )
+        except Exception as e:
+            logger.warning(f"保存人格学习审查快照失败 id={review_id}: {e}", exc_info=True)
+
+    async def _store_style_snapshot(
+        self, review_id: int, snapshot: Dict[str, Any]
+    ) -> None:
+        if not self.database_manager or not hasattr(self.database_manager, 'update_style_review_metadata'):
+            return
+        try:
+            await self.database_manager.update_style_review_metadata(
+                review_id,
+                {'change_snapshot': snapshot}
+            )
+        except Exception as e:
+            logger.warning(f"保存风格学习审查快照失败 id={review_id}: {e}", exc_info=True)
+
+    async def get_pending_persona_updates(
+        self,
+        limit: int = 0,
+        offset: int = 0,
+        keyword: str = "",
+    ) -> Dict[str, Any]:
+        """
+        获取所有待审查的人格更新 (整合三种数据源，支持分页)
+
+        Args:
+            limit: 每页数量，0 表示返回全部
+            offset: 偏移量
+            keyword: 关键词过滤，匹配人格更新内容、原因、群组、元数据等
+
+        Returns:
+            Dict: 包含待审查更新的字典，含 total 字段
+        """
+        all_updates = []
+
+        # 1. 获取传统的人格更新审查
+        if self.persona_updater:
+            try:
+                logger.debug("正在获取传统人格更新...")
+                traditional_updates = await self.persona_updater.get_pending_persona_updates()
+                logger.debug(f"获取到 {len(traditional_updates)} 个传统人格更新")
+
+                # 将PersonaUpdateRecord对象转换为字典格式
+                for record in traditional_updates:
+                    if hasattr(record, '__dict__'):
+                        record_dict = record.__dict__.copy()
+                    else:
+                        # 手动构建字典
+                        record_dict = {
+                            'id': getattr(record, 'id', None),
+                            'timestamp': getattr(record, 'timestamp', 0),
+                            'group_id': getattr(record, 'group_id', 'default'),
+                            'update_type': getattr(record, 'update_type', 'unknown'),
+                            'original_content': getattr(record, 'original_content', ''),
+                            'new_content': getattr(record, 'new_content', ''),
+                            'reason': getattr(record, 'reason', ''),
+                            'status': getattr(record, 'status', 'pending'),
+                            'reviewer_comment': getattr(record, 'reviewer_comment', None),
+                            'review_time': getattr(record, 'review_time', None)
+                        }
+
+                    # 添加前端需要的字段
+                    record_dict['proposed_content'] = record_dict.get('new_content', '')
+                    record_dict['confidence_score'] = 0.8
+                    record_dict['reviewed'] = record_dict.get('status', 'pending') != 'pending'
+                    record_dict['approved'] = record_dict.get('status', 'pending') == 'approved'
+                    record_dict['review_source'] = 'traditional'
+                    change_preview = await self._build_change_preview(
+                        review_id=str(record_dict.get('id')),
+                        review_source='traditional',
+                        group_id=record_dict.get('group_id', 'default'),
+                        proposed_content=record_dict.get('new_content', ''),
+                    )
+                    record_dict['change_preview'] = change_preview
+                    record_dict['persona_change_preview'] = change_preview
+
+                    all_updates.append(record_dict)
+
+            except Exception as e:
+                logger.error(f"获取传统人格更新失败: {e}", exc_info=True)
+        else:
+            logger.warning("persona_updater 不可用")
+
+        # 2. 获取人格学习审查（包括渐进式学习、表达学习等）
+        if self.database_manager:
+            try:
+                logger.debug("正在获取人格学习审查...")
+                persona_learning_reviews = await self.database_manager.get_pending_persona_learning_reviews()
+                logger.debug(f"获取到 {len(persona_learning_reviews)} 个人格学习审查")
+
+                for review in persona_learning_reviews:
+                    # 使用常量进行类型标准化和分类
+                    raw_update_type = review.get('update_type', '')
+                    normalized_type = normalize_update_type(raw_update_type)
+                    review_source = get_review_source_from_update_type(raw_update_type)
+
+                    # 跳过风格学习（在步骤3单独处理）
+                    if normalized_type == UPDATE_TYPE_STYLE_LEARNING:
+                        logger.debug(f"跳过风格学习记录 ID={review['id']}，在步骤3处理")
+                        continue
+
+                    # 获取原人格文本（如果数据库中为空，实时获取）
+                    original_content = review['original_content']
+                    group_id = review['group_id']
+
+                    if not original_content or original_content.strip() == '':
+                        logger.info(f"数据库中没有原人格文本，实时获取群组 {group_id} 的原人格")
+                        try:
+                            if self.astrbot_persona_manager:
+                                current_persona = await resolve_target_persona(
+                                    self.astrbot_persona_manager,
+                                    self.plugin_config,
+                                    self._resolve_umo(group_id),
+                                    require_existing=True,
+                                    log=logger,
+                                )
+                                if current_persona and current_persona.get('prompt'):
+                                    original_content = current_persona.get('prompt', '')
+                                    logger.info(f"成功获取群组 {group_id} 的原人格文本，长度: {len(original_content)}")
+                                else:
+                                    original_content = "[无法获取原人格文本]"
+                                    logger.warning(f"无法获取群组 {group_id} 的原人格文本")
+                            else:
+                                original_content = "[PersonaManager未初始化]"
+                                logger.warning("PersonaManager未初始化，无法获取原人格")
+                        except Exception as e:
+                            logger.warning(f"获取群组 {group_id} 原人格失败: {e}", exc_info=True)
+                            original_content = f"[获取原人格失败: {str(e)}]"
+
+                    # 转换为统一的审查格式
+                    review_dict = {
+                        'id': f"persona_learning_{review['id']}" if review_source == 'persona_learning' else str(review['id']),
+                        'timestamp': review['timestamp'],
+                        'group_id': group_id,
+                        'update_type': raw_update_type,
+                        'normalized_type': normalized_type,
+                        'original_content': original_content,
+                        'new_content': review['new_content'],
+                        'proposed_content': review.get('proposed_content', review['new_content']),
+                        'reason': review['reason'],
+                        'status': review['status'],
+                        'reviewer_comment': review['reviewer_comment'],
+                        'review_time': review['review_time'],
+                        'confidence_score': review.get('confidence_score', 0.5),
+                        'reviewed': False,
+                        'approved': False,
+                        'review_source': review_source,
+                        'persona_learning_review_id': review['id'],
+                        'features_content': review.get('metadata', {}).get('features_content', ''),
+                        'llm_response': review.get('metadata', {}).get('llm_response', ''),
+                        'total_raw_messages': review.get('metadata', {}).get('total_raw_messages', 0),
+                        'messages_analyzed': review.get('metadata', {}).get('messages_analyzed', 0),
+                        'metadata': review.get('metadata', {}),
+                        'incremental_content': review.get('metadata', {}).get('incremental_content', ''),
+                        'incremental_start_pos': review.get('metadata', {}).get('incremental_start_pos', 0)
+                    }
+                    incremental_content = (
+                        review_dict.get('proposed_content')
+                        or review_dict.get('new_content')
+                        or review_dict.get('incremental_content')
+                        or ''
+                    )
+                    change_preview = await self._build_change_preview(
+                        review_id=review_dict['id'],
+                        review_source=review_source,
+                        group_id=group_id,
+                        proposed_content=incremental_content,
+                    )
+                    review_dict['change_preview'] = change_preview
+                    review_dict['persona_change_preview'] = change_preview
+
+                    all_updates.append(review_dict)
+                    logger.debug(f"添加审查记录: ID={review_dict['id']}, type={raw_update_type}, source={review_source}")
+
+            except Exception as e:
+                logger.error(f"获取人格学习审查失败: {e}", exc_info=True)
+        else:
+            logger.warning("database_manager 不可用")
+
+        # 3. 获取风格学习审查（Few-shot样本学习）
+        if self.database_manager:
+            try:
+                logger.debug("正在获取风格学习审查...")
+                style_reviews = await self.database_manager.get_pending_style_reviews()
+                logger.debug(f"获取到 {len(style_reviews)} 个风格学习审查")
+
+                for review in style_reviews:
+                    group_id = review['group_id']
+                    original_persona_text = ""
+
+                    try:
+                        # 通过 persona_manager 获取当前人格
+                        if self.astrbot_persona_manager:
+                            current_persona = await resolve_target_persona(
+                                self.astrbot_persona_manager,
+                                self.plugin_config,
+                                self._resolve_umo(group_id),
+                                require_existing=True,
+                                log=logger,
+                            )
+                            if current_persona and current_persona.get('prompt'):
+                                original_persona_text = current_persona.get('prompt', '')
+                            else:
+                                original_persona_text = "[无法获取原人格文本]"
+                        else:
+                            original_persona_text = "[PersonaManager未初始化]"
+                    except Exception as e:
+                        logger.warning(f"获取群组 {group_id} 原人格失败: {e}", exc_info=True)
+                        original_persona_text = f"[获取原人格失败: {str(e)}]"
+
+                    # 构建完整的新内容（原人格 + Few-shot内容）
+                    few_shots_content = review['few_shots_content']
+                    full_new_content = original_persona_text + "\n\n" + few_shots_content if original_persona_text else few_shots_content
+
+                    # 转换为统一的审查格式
+                    review_dict = {
+                        'id': f"style_{review['id']}",
+                        'timestamp': review['timestamp'],
+                        'group_id': group_id,
+                        'update_type': UPDATE_TYPE_STYLE_LEARNING,
+                        'normalized_type': UPDATE_TYPE_STYLE_LEARNING,
+                        'original_content': original_persona_text,
+                        'new_content': full_new_content,
+                        'proposed_content': few_shots_content,
+                        'reason': review['description'],
+                        'status': review['status'],
+                        'reviewer_comment': None,
+                        'review_time': None,
+                        'confidence_score': 0.9,
+                        'reviewed': False,
+                        'approved': False,
+                        'review_source': 'style_learning',
+                        'learned_patterns': review.get('learned_patterns', []),
+                        'style_review_id': review['id'],
+                        'incremental_start_pos': len(original_persona_text) + 2 if original_persona_text else 0
+                    }
+                    review_dict['metadata'] = review.get('metadata', {})
+                    change_preview = await self._build_change_preview(
+                        review_id=review_dict['id'],
+                        review_source='style_learning',
+                        group_id=group_id,
+                        proposed_content=few_shots_content,
+                        style_review=review,
+                    )
+                    review_dict['change_preview'] = change_preview
+                    review_dict['persona_change_preview'] = change_preview
+
+                    all_updates.append(review_dict)
+
+            except Exception as e:
+                logger.error(f"获取风格学习审查失败: {e}", exc_info=True)
+
+        # 按时间倒序排列
+        all_updates.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+
+        if keyword:
+            all_updates = [
+                update for update in all_updates
+                if self._matches_review_keyword(update, keyword)
+            ]
+
+        total = len(all_updates)
+
+        logger.debug(f"共 {total} 条人格更新记录 (传统: {len([u for u in all_updates if u['review_source'] == 'traditional'])}, "
+                     f"人格学习: {len([u for u in all_updates if u['review_source'] == 'persona_learning'])}, "
+                     f"风格学习: {len([u for u in all_updates if u['review_source'] == 'style_learning'])})")
+
+        # 应用分页
+        if limit > 0:
+            paged_updates = all_updates[offset:offset + limit]
+            logger.debug(f"分页返回: offset={offset}, limit={limit}, 本页 {len(paged_updates)} 条")
+        else:
+            paged_updates = all_updates
+
+        return {
+            "success": True,
+            "updates": paged_updates,
+            "total": total
+        }
+
+    @staticmethod
+    def _matches_review_keyword(item: Dict[str, Any], keyword: str) -> bool:
+        needle = str(keyword or "").strip().casefold()
+        if not needle:
+            return True
+        try:
+            haystack = json.dumps(item, ensure_ascii=False, default=str).casefold()
+        except TypeError:
+            haystack = str(item).casefold()
+        return needle in haystack
+
+    async def review_persona_update(
+        self,
+        update_id: str,
+        action: str,
+        comment: str = "",
+        modified_content: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """
+        审查人格更新内容 (批准/拒绝)
+
+        Args:
+            update_id: 更新ID (可能带前缀: style_, persona_learning_)
+            action: 操作 ('approve' 或 'reject')
+            comment: 审查备注
+            modified_content: 用户修改后的内容
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 消息)
+        """
+        logger.info(f"=== 开始审查人格更新 {update_id} ===")
+
+        # 将action转换为status
+        if action == "approve":
+            status = "approved"
+        elif action == "reject":
+            status = "rejected"
+        else:
+            return False, "Invalid action, must be 'approve' or 'reject'"
+
+        # 判断审查类型
+        if update_id.startswith("style_"):
+            # 风格学习审查
+            style_review_id = int(update_id.replace("style_", ""))
+
+            if action == "approve":
+                return await self._approve_style_learning_review(style_review_id)
+            else:
+                return await self._reject_style_learning_review(style_review_id)
+
+        elif update_id.startswith("persona_learning_"):
+            # 人格学习审查
+            persona_learning_review_id = int(update_id.replace("persona_learning_", ""))
+
+            if not self.database_manager:
+                return False, "Database manager not initialized"
+
+            # 更新审查状态
+            success = await self.database_manager.update_persona_learning_review_status(
+                persona_learning_review_id, status, comment, modified_content
+            )
+
+            if success:
+                if action == "approve":
+                    # 批准后将新内容追加到当前人格末尾
+                    try:
+                        review_data = await self.database_manager.get_persona_learning_review_by_id(persona_learning_review_id)
+                        if review_data:
+                            # 确定要追加的增量内容
+                            incremental_content = modified_content or review_data.get('proposed_content', '')
+                            group_id = review_data.get('group_id', 'default')
+                            before_snapshot = await self._get_current_persona_snapshot(group_id)
+                            change_snapshot = await self._build_change_preview(
+                                review_id=update_id,
+                                review_source='persona_learning',
+                                group_id=group_id,
+                                proposed_content=incremental_content,
+                                current_snapshot=before_snapshot,
+                            )
+                            incremental_content = change_snapshot.get('proposed_content', '')
+
+                            auto_apply_enabled = self._auto_apply_enabled()
+                            logger.info(
+                                f"[人格审批] id={persona_learning_review_id}, "
+                                f"auto_apply={auto_apply_enabled}, "
+                                f"persona_web_manager={'有' if self.persona_web_manager else '无'}, "
+                                f"incremental_content长度={len(incremental_content) if incremental_content else 0}, "
+                                f"group_id={group_id}"
+                            )
+                            if auto_apply_enabled and self.persona_web_manager and incremental_content:
+                                try:
+                                    # 通过 persona_web_manager 获取/更新（线程安全）
+                                    current = before_snapshot
+                                    persona_name = current.get('persona_id', 'default')
+                                    current_prompt = current.get('system_prompt', '')
+                                    logger.info(
+                                        f"[人格审批] 获取到当前人格: name={persona_name}, "
+                                        f"prompt长度={len(current_prompt)}"
+                                    )
+
+                                    # 追加增量内容到当前人格末尾
+                                    new_prompt = change_snapshot.get('after_system_prompt', '')
+
+                                    result = await self.persona_web_manager.update_persona_via_web(
+                                        persona_name, {"system_prompt": new_prompt}
+                                    )
+                                    if result.get('success'):
+                                        after = await self._get_current_persona_snapshot(group_id)
+                                        change_payload = self._build_change_payload(
+                                            self._persona_snapshot_from_current(before_snapshot),
+                                            after,
+                                            applied_at=time.time(),
+                                            review_id=str(persona_learning_review_id),
+                                            review_source='persona_learning',
+                                            group_id=group_id,
+                                            proposed_content=incremental_content,
+                                            application_mode='append_system_prompt',
+                                        )
+                                        await self._save_change_snapshot(
+                                            'persona_learning',
+                                            str(persona_learning_review_id),
+                                            change_payload,
+                                        )
+                                        logger.info(
+                                            f"人格学习审查 {persona_learning_review_id} 已批准，"
+                                            f"增量内容已追加到人格 [{persona_name}] 末尾"
+                                        )
+                                        message = (
+                                            f"人格学习审查 {persona_learning_review_id} 已批准，"
+                                            f"已追加到人格 [{persona_name}]"
+                                        )
+                                    else:
+                                        err = result.get('error', '未知错误')
+                                        logger.error(f"更新人格失败: {err}")
+                                        message = f"人格学习审查 {persona_learning_review_id} 已批准，但更新人格失败: {err}"
+                                except Exception as apply_error:
+                                    logger.error(f"应用人格更新失败: {apply_error}", exc_info=True)
+                                    message = f"人格学习审查 {persona_learning_review_id} 已批准，但应用过程出错: {str(apply_error)}"
+                            elif not auto_apply_enabled:
+                                message = (
+                                    f"人格学习审查 {persona_learning_review_id} 已批准"
+                                    f"（开启 auto_apply_persona_updates 可自动追加到当前人格）"
+                                )
+                            elif not incremental_content:
+                                message = f"人格学习审查 {persona_learning_review_id} 已批准，但缺少增量内容"
+                            else:
+                                message = f"人格学习审查 {persona_learning_review_id} 已批准，但 PersonaWebManager 未初始化"
+
+                            change_snapshot['applied_at'] = datetime.now().isoformat()
+                            await self._store_persona_learning_snapshot(
+                                persona_learning_review_id,
+                                change_snapshot,
+                            )
+                        else:
+                            logger.error(f"无法获取人格学习审查 {persona_learning_review_id} 的详情")
+                            message = f"人格学习审查 {persona_learning_review_id} 已批准，但无法获取详情"
+                    except Exception as e:
+                        logger.error(f"批准人格学习审查失败: {e}", exc_info=True)
+                        message = f"人格学习审查 {persona_learning_review_id} 已批准，但处理过程出错: {str(e)}"
+                else:
+                    message = f"人格学习审查 {persona_learning_review_id} 已拒绝"
+
+                return True, message
+            else:
+                return False, "Failed to update persona learning review status"
+
+        else:
+            # 传统人格审查
+            logger.info(f"[传统审批] update_id={update_id}, action={action}")
+
+            result = False
+            if self.persona_updater and hasattr(self.persona_updater, 'review_persona_update'):
+                result = await self.persona_updater.review_persona_update(
+                    int(update_id), status, comment
+                )
+            elif self.database_manager:
+                result = await self.database_manager.update_persona_update_record_status(
+                    int(update_id), status, comment
+                )
+            else:
+                return False, "Persona updater not initialized"
+
+            if not result:
+                return False, "Failed to update persona review status"
+
+            if action != "approve":
+                return True, f"人格更新 {update_id} 已拒绝"
+
+            record = None
+            if self.database_manager and hasattr(self.database_manager, 'get_persona_update_record_by_id'):
+                record = await self.database_manager.get_persona_update_record_by_id(int(update_id))
+            if record:
+                new_content_for_snapshot = modified_content or record.get('new_content', '')
+                if new_content_for_snapshot:
+                    change_snapshot = await self._build_change_preview(
+                        review_id=str(update_id),
+                        review_source='traditional',
+                        group_id=record.get('group_id', 'default'),
+                        proposed_content=new_content_for_snapshot,
+                    )
+                    change_snapshot['applied_at'] = datetime.now().isoformat()
+                    await self._store_persona_learning_snapshot(
+                        int(update_id),
+                        change_snapshot,
+                    )
+
+            # 批准后自动应用到当前人格（通过 persona_web_manager 线程安全调用）
+            auto_apply_enabled = self._auto_apply_enabled()
+            logger.info(
+                f"[传统审批] auto_apply={auto_apply_enabled}, "
+                f"persona_web_manager={'有' if self.persona_web_manager else '无'}"
+            )
+
+            if not auto_apply_enabled or not self.persona_web_manager:
+                msg = f"人格更新 {update_id} 已批准"
+                if not auto_apply_enabled:
+                    msg += "（开启 auto_apply_persona_updates 可自动应用到当前人格）"
+                return True, msg
+
+            try:
+                # 获取审查记录中的新内容
+                if record is None and self.database_manager and hasattr(self.database_manager, 'get_persona_update_record_by_id'):
+                    record = await self.database_manager.get_persona_update_record_by_id(int(update_id))
+                if not record:
+                    return True, f"人格更新 {update_id} 已批准，但无法获取记录详情"
+
+                new_content = modified_content or record.get('new_content', '')
+                group_id = record.get('group_id', 'default')
+
+                if not new_content:
+                    return True, f"人格更新 {update_id} 已批准，但缺少新内容"
+
+                # 通过 persona_web_manager 获取/更新（线程安全）
+                change_preview = await self._build_change_preview(
+                    review_id=str(update_id),
+                    review_source='traditional',
+                    group_id=group_id,
+                    proposed_content=new_content,
+                )
+                persona_name = change_preview.get('applied_persona_id', 'default')
+                logger.info(
+                    f"[传统审批] 获取到人格: name={persona_name}, "
+                    f"new_content长度={len(new_content)}, group_id={group_id}"
+                )
+
+                update_result = await self.persona_web_manager.update_persona_via_web(
+                    persona_name, {"system_prompt": new_content}
+                )
+                if update_result.get('success'):
+                    after = await self._get_current_persona_snapshot(group_id)
+                    change_payload = self._build_change_payload(
+                        {
+                            'persona_id': change_preview.get('applied_persona_id', 'default'),
+                            'persona_name': change_preview.get('applied_persona_name', 'default'),
+                            'system_prompt': change_preview.get('before_system_prompt', ''),
+                            'begin_dialogs': change_preview.get('before_begin_dialogs', []),
+                            'group_id': group_id,
+                        },
+                        after,
+                        applied_at=time.time(),
+                        review_id=str(update_id),
+                        review_source='traditional',
+                        group_id=group_id,
+                        proposed_content=new_content,
+                        application_mode='replace_system_prompt',
+                    )
+                    await self._save_change_snapshot(
+                        'traditional',
+                        str(update_id),
+                        change_payload,
+                    )
+                    logger.info(f"人格更新 {update_id} 已批准并应用到人格 [{persona_name}]")
+                    return True, f"人格更新 {update_id} 已批准，已应用到人格 [{persona_name}]"
+                else:
+                    err = update_result.get('error', '未知错误')
+                    logger.error(f"[传统审批] 更新人格失败: {err}")
+                    return True, f"人格更新 {update_id} 已批准，但应用失败: {err}"
+
+            except Exception as e:
+                logger.error(f"[传统审批] 应用人格更新失败: {e}", exc_info=True)
+                return True, f"人格更新 {update_id} 已批准，但应用过程出错: {str(e)}"
+
+    async def _approve_style_learning_review(self, review_id: int) -> Tuple[bool, str]:
+        """批准风格学习审查（内部方法）- 创建新人格"""
+        if not self.database_manager:
+            return False, "数据库管理器未初始化"
+
+        # 获取审查详情
+        pending_reviews = await self.database_manager.get_pending_style_reviews()
+        target_review = None
+        for review in pending_reviews:
+            if review['id'] == review_id:
+                target_review = review
+                break
+
+        if not target_review:
+            return False, '审查记录不存在'
+
+        group_id = target_review.get('group_id', 'default')
+        before_snapshot = await self._get_current_persona_snapshot(group_id)
+        dialog_pairs = self._extract_style_dialog_pairs(target_review)
+        change_snapshot = await self._build_change_preview(
+            review_id=f"style_{review_id}",
+            review_source='style_learning',
+            group_id=group_id,
+            proposed_content=target_review.get('few_shots_content', '') or '',
+            current_snapshot=before_snapshot,
+            style_review=target_review,
+        )
+
+        # 更新状态
+        success = await self.database_manager.update_style_review_status(
+            review_id, 'approved', group_id=group_id
+        )
+
+        if success and target_review['few_shots_content']:
+            # 自动追加到 begin_dialogs（通过 persona_web_manager，线程安全）
+            auto_apply_enabled = self._auto_apply_enabled()
+            logger.info(
+                f"[风格审批] id={review_id}, auto_apply={auto_apply_enabled}, "
+                f"persona_web_manager={'有' if self.persona_web_manager else '无'}, "
+                f"group_id={group_id}"
+            )
+            if auto_apply_enabled and self.persona_web_manager:
+                try:
+                    persona_name = before_snapshot.get('persona_id', 'default')
+
+                    if dialog_pairs:
+                        result = await self.persona_web_manager.update_persona_via_web(
+                            persona_name, {"begin_dialogs": change_snapshot.get('after_begin_dialogs', [])}
+                        )
+                        if result.get('success'):
+                            after = await self._get_current_persona_snapshot(group_id)
+                            change_payload = self._build_change_payload(
+                                self._persona_snapshot_from_current(before_snapshot),
+                                after,
+                                applied_at=time.time(),
+                                review_id=str(review_id),
+                                review_source='style_learning',
+                                group_id=group_id,
+                                proposed_content=target_review.get('few_shots_content', '') or '',
+                                application_mode='append_begin_dialogs',
+                                style_dialog_pairs=dialog_pairs,
+                            )
+                            await self._save_change_snapshot(
+                                'style_learning',
+                                str(review_id),
+                                change_payload,
+                            )
+                            logger.info(
+                                f"风格学习审查 {review_id} 已批准，"
+                                f"{len(dialog_pairs)} 组示例对话已注入 begin_dialogs [{persona_name}]"
+                            )
+                            change_snapshot['applied_at'] = datetime.now().isoformat()
+                            await self._store_style_snapshot(review_id, change_snapshot)
+                            return True, f"风格学习审查 {review_id} 已批准，已注入 {len(dialog_pairs)} 组示例对话到人格 [{persona_name}]"
+                        else:
+                            err = result.get('error', '未知错误')
+                            logger.error(f"更新 begin_dialogs 失败: {err}")
+                            change_snapshot['applied_at'] = datetime.now().isoformat()
+                            await self._store_style_snapshot(review_id, change_snapshot)
+                            return True, f"风格学习审查 {review_id} 已批准，但更新 begin_dialogs 失败: {err}"
+                    else:
+                        change_snapshot['applied_at'] = datetime.now().isoformat()
+                        await self._store_style_snapshot(review_id, change_snapshot)
+                        return True, f"风格学习审查 {review_id} 已批准，但未能提取到有效的对话示例"
+                except Exception as e:
+                    logger.error(f"风格学习审查批准后应用到人格失败: {e}", exc_info=True)
+                    change_snapshot['applied_at'] = datetime.now().isoformat()
+                    await self._store_style_snapshot(review_id, change_snapshot)
+                    return True, f"风格学习审查 {review_id} 已批准，但应用过程出错: {str(e)}"
+            else:
+                msg = f"风格学习审查 {review_id} 已批准"
+                if not auto_apply_enabled:
+                    msg += "（开启 auto_apply_persona_updates 或 auto_apply_approved_persona 可自动追加到当前人格）"
+                change_snapshot['applied_at'] = datetime.now().isoformat()
+                await self._store_style_snapshot(review_id, change_snapshot)
+                return True, msg
+        else:
+            change_snapshot['applied_at'] = datetime.now().isoformat()
+            await self._store_style_snapshot(review_id, change_snapshot)
+            return True, f"风格学习审查 {review_id} 已批准"
+
+    @staticmethod
+    def _parse_few_shots_to_pairs(text: str) -> List[Tuple[str, str]]:
+        """从 few_shots_content 文本中解析 A/B 对话对。
+
+        支持格式:
+          A: xxx\\nB: yyy
+          A（用户发言）: xxx\\nB（回复）: yyy
+        """
+        import re
+        pairs = []
+        # 匹配 A: ... B: ... 对
+        pattern = re.compile(
+            r'A(?:\s*[（(][^)）]*[)）])?\s*[:：]\s*(.+?)[\r\n]+'
+            r'B(?:\s*[（(][^)）]*[)）])?\s*[:：]\s*(.+?)(?:\n|$)',
+            re.DOTALL
+        )
+        for match in pattern.finditer(text):
+            a_text = match.group(1).strip()
+            b_text = match.group(2).strip()
+            if a_text and b_text:
+                pairs.append((a_text, b_text))
+        return pairs
+
+    async def _reject_style_learning_review(self, review_id: int) -> Tuple[bool, str]:
+        """拒绝风格学习审查（内部方法）"""
+        if not self.database_manager:
+            return False, "数据库管理器未初始化"
+
+        success = await self.database_manager.update_style_review_status(
+            review_id, 'rejected'
+        )
+
+        if success:
+            return True, f"风格学习审查 {review_id} 已拒绝"
+        else:
+            return False, "拒绝审查失败"
+
+    async def get_reviewed_persona_updates(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status_filter: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        获取已审查的人格更新列表
+
+        Args:
+            limit: 限制数量
+            offset: 偏移量
+            status_filter: 状态筛选 ('approved' 或 'rejected' 或 None)
+
+        Returns:
+            Dict: 包含已审查更新的字典
+        """
+        reviewed_updates = []
+
+        # 从传统人格更新审查获取
+        if self.persona_updater:
+            try:
+                traditional_updates = await self.persona_updater.get_reviewed_persona_updates(limit, offset, status_filter)
+                if traditional_updates:
+                    for update in traditional_updates:
+                        update.setdefault('review_source', 'traditional')
+                        persona_snapshot = await self._load_change_snapshot(
+                            'traditional',
+                            str(update.get('id')),
+                        )
+                        if persona_snapshot:
+                            update['persona_change_snapshot'] = persona_snapshot
+                        snapshot = self._metadata_change_snapshot(update)
+                        if snapshot:
+                            update['change_snapshot'] = snapshot
+                            update['change_preview'] = snapshot
+                        elif persona_snapshot:
+                            update['change_snapshot'] = persona_snapshot
+                            update['change_preview'] = persona_snapshot
+                        else:
+                            update['change_preview'] = {
+                                'review_id': str(update.get('id')),
+                                'review_source': 'traditional',
+                                'group_id': update.get('group_id', 'default'),
+                                'applied_persona_id': update.get('applied_persona_id', 'default'),
+                                'applied_persona_name': update.get('applied_persona_name', update.get('applied_persona_id', 'default')),
+                                'target_fields': ['system_prompt'],
+                                'application_mode': 'replace_system_prompt',
+                                'before_system_prompt': update.get('original_content', ''),
+                                'after_system_prompt': update.get('proposed_content') or update.get('new_content', ''),
+                                'before_begin_dialogs': [],
+                                'after_begin_dialogs': [],
+                                'proposed_content': update.get('proposed_content') or update.get('new_content', ''),
+                            }
+                    reviewed_updates.extend(traditional_updates)
+            except Exception as e:
+                logger.warning(f"获取传统已审查人格更新失败: {e}")
+
+        # 从人格学习审查获取
+        if self.database_manager:
+            try:
+                persona_learning_updates = await self.database_manager.get_reviewed_persona_learning_updates(limit, offset, status_filter)
+                if persona_learning_updates:
+                    for update in persona_learning_updates:
+                        raw_id = update.get('id')
+                        if raw_id is not None:
+                            update['id'] = f"persona_learning_{raw_id}"
+                        update.setdefault('review_source', 'persona_learning')
+                        persona_snapshot = await self._load_change_snapshot(
+                            'persona_learning',
+                            str(raw_id),
+                        )
+                        if persona_snapshot:
+                            update['persona_change_snapshot'] = persona_snapshot
+                        snapshot = self._metadata_change_snapshot(update)
+                        if snapshot:
+                            update['change_snapshot'] = snapshot
+                            update['change_preview'] = snapshot
+                        elif persona_snapshot:
+                            update['change_snapshot'] = persona_snapshot
+                            update['change_preview'] = persona_snapshot
+                    reviewed_updates.extend(persona_learning_updates)
+            except Exception as e:
+                logger.warning(f"获取已审查人格学习更新失败: {e}")
+
+        # 从风格学习审查获取
+        if self.database_manager:
+            try:
+                style_updates = await self.database_manager.get_reviewed_style_learning_updates(limit, offset, status_filter)
+                if style_updates:
+                    valid_style_updates = []
+                    for update in style_updates:
+                        # 转换风格学习字段为前端统一格式
+                        raw_id = update.get('id')
+                        update['id'] = f"style_{raw_id}" if raw_id is not None else None
+                        update['update_type'] = update.get('type', UPDATE_TYPE_STYLE_LEARNING)
+                        update['original_content'] = ''
+                        style_content = update.get('few_shots_content') or update.get('new_content', '')
+                        update['new_content'] = style_content
+                        update['proposed_content'] = style_content
+                        update['confidence_score'] = 0.9
+                        update['reason'] = update.get('description', '') or '风格学习审查'
+                        update['review_source'] = 'style_learning'
+                        persona_snapshot = await self._load_change_snapshot(
+                            'style_learning',
+                            str(raw_id),
+                        )
+                        if persona_snapshot:
+                            update['persona_change_snapshot'] = persona_snapshot
+                        snapshot = self._metadata_change_snapshot(update)
+                        if snapshot:
+                            update['change_snapshot'] = snapshot
+                            update['change_preview'] = snapshot
+                        elif persona_snapshot:
+                            update['change_snapshot'] = persona_snapshot
+                            update['change_preview'] = persona_snapshot
+                        valid_style_updates.append(update)
+                    reviewed_updates.extend(valid_style_updates)
+            except Exception as e:
+                logger.warning(f"获取已审查风格学习更新失败: {e}")
+
+        # 过滤掉无效记录（id 为 None 或空的条目）
+        reviewed_updates = [
+            u for u in reviewed_updates
+            if u and u.get('id') is not None
+        ]
+
+        # 按审查时间排序
+        reviewed_updates.sort(key=lambda x: x.get('review_time') or 0, reverse=True)
+
+        return {
+            "success": True,
+            "updates": reviewed_updates,
+            "total": len(reviewed_updates)
+        }
+
+    async def revert_persona_update(self, update_id: str, reason: str = "撤回审查决定") -> Tuple[bool, str]:
+        """
+        撤回人格更新审查
+
+        Args:
+            update_id: 更新ID
+            reason: 撤回原因
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 消息)
+        """
+        # 判断撤回类型
+        if update_id.startswith("style_"):
+            # 风格学习审查撤回
+            style_review_id = int(update_id.replace("style_", ""))
+
+            if not self.database_manager:
+                return False, "Database manager not initialized"
+
+            success = await self.database_manager.update_style_review_status(
+                style_review_id, "pending"
+            )
+
+            if success:
+                return True, f"风格学习审查 {style_review_id} 已撤回，重新回到待审查状态"
+            else:
+                return False, "Failed to revert style learning review"
+
+        elif update_id.startswith("persona_learning_"):
+            # 人格学习审查撤回
+            persona_learning_review_id = int(update_id.replace("persona_learning_", ""))
+
+            if not self.database_manager:
+                return False, "Database manager not initialized"
+
+            success = await self.database_manager.update_persona_learning_review_status(
+                persona_learning_review_id, "pending", f"撤回操作: {reason}"
+            )
+
+            if success:
+                return True, f"人格学习审查 {persona_learning_review_id} 已撤回，重新回到待审查状态"
+            else:
+                return False, "Failed to revert persona learning review"
+        else:
+            # 传统人格审查撤回
+            if self.persona_updater:
+                result = await self.persona_updater.revert_persona_update_review(int(update_id), reason)
+                if result:
+                    return True, f"人格更新 {update_id} 审查已撤回，重新回到待审查状态"
+                else:
+                    return False, "Failed to revert persona update review"
+            else:
+                return False, "Persona updater not initialized"
+
+    async def delete_persona_update(self, update_id: str) -> Tuple[bool, str]:
+        """
+        删除人格更新审查记录
+
+        Args:
+            update_id: 更新ID
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 消息)
+        """
+        if not self.database_manager:
+            return False, "Database manager not available"
+
+        # 解析update_id，处理前缀
+        if isinstance(update_id, str):
+            if update_id.startswith("persona_learning_"):
+                numeric_id = int(update_id.replace("persona_learning_", ""))
+                success = await self.database_manager.delete_persona_learning_review_by_id(numeric_id)
+                if success:
+                    return True, f"人格学习审查记录 {numeric_id} 已删除"
+                else:
+                    return False, f"未找到人格学习审查记录: {numeric_id}"
+
+            elif update_id.startswith("style_"):
+                numeric_id = int(update_id.replace("style_", ""))
+                success = await self.database_manager.delete_style_review_by_id(numeric_id)
+                if success:
+                    return True, f"风格学习审查记录 {numeric_id} 已删除"
+                else:
+                    return False, f"未找到风格学习审查记录: {numeric_id}"
+            else:
+                # 尝试作为纯数字ID处理
+                try:
+                    numeric_id = int(update_id)
+                except ValueError:
+                    return False, f"无效的ID格式: {update_id}"
+        else:
+            numeric_id = int(update_id)
+
+        # 尝试删除人格学习审查记录
+        success = await self.database_manager.delete_persona_learning_review_by_id(numeric_id)
+
+        if success:
+            return True, f"人格学习审查记录 {numeric_id} 已删除"
+        else:
+            # 如果人格学习审查记录不存在，尝试删除传统人格审查记录
+            if self.persona_updater:
+                result = await self.persona_updater.delete_persona_update_review(numeric_id)
+                if result:
+                    return True, f"人格更新审查记录 {numeric_id} 已删除"
+                else:
+                    return False, "Record not found"
+            else:
+                return False, "Record not found"
+
+    async def batch_delete_persona_updates(self, update_ids: List[str]) -> Dict[str, Any]:
+        """
+        批量删除人格更新审查记录
+
+        Args:
+            update_ids: 更新ID列表
+
+        Returns:
+            Dict: 包含操作结果的字典
+        """
+        if not self.database_manager:
+            return {
+                "success": False,
+                "error": "Database manager not available"
+            }
+
+        success_count = 0
+        failed_count = 0
+
+        for update_id in update_ids:
+            try:
+                success, _ = await self.delete_persona_update(update_id)
+                if success:
+                    success_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"删除人格更新审查记录 {update_id} 失败: {e}", exc_info=True)
+                failed_count += 1
+
+        return {
+            "success": True,
+            "message": f"批量删除完成：成功 {success_count} 条，失败 {failed_count} 条",
+            "details": {
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_count": len(update_ids)
+            }
+        }
+
+    async def batch_review_persona_updates(
+        self,
+        update_ids: List[str],
+        action: str,
+        comment: str = ""
+    ) -> Dict[str, Any]:
+        """
+        批量审查人格更新记录
+
+        Args:
+            update_ids: 更新ID列表
+            action: 操作 ('approve' 或 'reject')
+            comment: 审查备注
+
+        Returns:
+            Dict: 包含操作结果的字典
+        """
+        if action not in ['approve', 'reject']:
+            return {
+                "success": False,
+                "error": "action must be 'approve' or 'reject'"
+            }
+
+        if not self.database_manager:
+            return {
+                "success": False,
+                "error": "Database manager not available"
+            }
+
+        success_count = 0
+        failed_count = 0
+
+        for update_id in update_ids:
+            try:
+                success, _ = await self.review_persona_update(update_id, action, comment)
+                if success:
+                    success_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"批量审查人格更新记录 {update_id} 失败: {e}", exc_info=True)
+                failed_count += 1
+
+        action_text = "批准" if action == 'approve' else "拒绝"
+        return {
+            "success": True,
+            "message": f"批量{action_text}完成：成功 {success_count} 条，失败 {failed_count} 条",
+            "details": {
+                "success_count": success_count,
+                "failed_count": failed_count,
+                "total_count": len(update_ids)
+            }
+        }

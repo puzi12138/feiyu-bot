@@ -1,0 +1,6 @@
+name: feiyu_agent_soul
+display_name: 肥鱼 · 可溯源记忆体检
+desc: 适配 dsh-agent-soul 的只读架构工具，核查现有记忆与手账原文，不覆盖人格或重复存储。
+version: v1.0.0
+author: local
+repo: ""

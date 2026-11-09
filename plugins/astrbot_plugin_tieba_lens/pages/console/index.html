@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN" data-color-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>贴吧拾光 · 管理控制台</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3M3 12h18"/><path d="M8 8h8M8 16h5"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h6m4 0h6M4 17h10m4 0h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 4 16 4 16 0V5M4 12v7c0 4 16 4 16 0v-7"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 8a8 8 0 1 0 0 8M20 3v5h-5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v6m4-6v6"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 7-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m2 1 2-2a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0" transform="translate(1 0)"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="2"/><path d="m3 17 5-5 4 4 4-6 5 7"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
+    <symbol id="theme-paper" viewBox="0 0 80 80"><path d="M16 14h40l8 9v43H16z" fill="currentColor" opacity=".1"/><path d="M16 14h40l8 9v43H16zM53 14v12h11M25 31h21M25 40h24M25 49h14"/><circle cx="54" cy="58" r="11" fill="currentColor"/><path d="m49 58 4 3 6-7" stroke="#fff"/></symbol>
+    <symbol id="theme-midnight" viewBox="0 0 80 80"><path d="M53 15a27 27 0 1 0 13 39A26 26 0 0 1 53 15Z" fill="currentColor" opacity=".22"/><path d="M53 15a27 27 0 1 0 13 39A26 26 0 0 1 53 15Z"/><path d="M61 16v10m-5-5h10M44 4v6m-3-3h6M68 38v6m-3-3h6"/></symbol>
+    <symbol id="theme-mist" viewBox="0 0 80 80"><circle cx="58" cy="21" r="8" fill="currentColor" opacity=".2"/><path d="m6 53 22-31 20 29 11-18 16 23" fill="currentColor" opacity=".12"/><path d="m6 53 22-31 20 29m-9-13 10-14 22 32M7 61h43m-21 8h44M7 44h15m32 15h20"/></symbol>
+    <symbol id="theme-denia" viewBox="0 0 80 80"><path d="M20 44V31a20 20 0 0 1 40 0v13l8 19-17-5H29l-17 5Z" fill="currentColor" opacity=".25"/><ellipse cx="40" cy="35" rx="16" ry="19" fill="#fff4ef"/><path d="M23 31q2-22 18-20 17 2 17 22L41 20 29 32Z" fill="currentColor"/><path d="M33 37v3m14-3v3m-10 7q3 3 6 0M28 65l12-9 12 9-12 7Z"/><path d="m40 59-12-4v12Zm0 0 12-4v12Z" fill="currentColor" opacity=".5"/><circle cx="59" cy="21" r="9" fill="currentColor"/><path d="M56 17q9 0 5 7-6 4-7-2 0-5 6-1" stroke="#fff4ef"/></symbol>
+    <symbol id="theme-miku" viewBox="0 0 80 80"><path d="M22 24Q7 28 9 70l16-6 5-33m28-7q15 4 13 46l-16-6-5-33" fill="currentColor" opacity=".7"/><ellipse cx="40" cy="31" rx="18" ry="21" fill="#f5fffa"/><path d="M22 32V25q1-19 19-19t18 23l-12-8-7 12-6-13-12 13Z" fill="currentColor"/><path d="M33 34v5m14-5v5m-10 8q3 2 6 0m-10 8 7 7 7-7m-7 7-4 12 4 3 4-3-4-12"/><path d="M21 22v14m38-14v14" stroke="#dc6599" stroke-width="5"/><path d="m28 57-9 12m33-12 9 12"/></symbol>
+    <symbol id="theme-bilibili" viewBox="0 0 80 80"><path d="m26 10 11 12m17-12L43 22"/><rect x="10" y="22" width="60" height="45" rx="9" fill="currentColor" opacity=".1"/><rect x="10" y="22" width="60" height="45" rx="9"/><path d="m25 37 2 9m26-9-2 9m-16 9q5 4 10 0M23 67v5m34-5v5" stroke-width="4"/></symbol>
+  </defs></svg>
+
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="贴吧拾光，返回总览"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span><strong>贴吧拾光</strong><small>TIEBA LENS</small></span></a>
+    <div class="workspace-label">工作空间 <span>01</span></div>
+    <nav class="main-nav" aria-label="主要导航">
+      <a href="#overview" data-nav="overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg><span>工作总览</span><span class="nav-dot"></span></a>
+      <a href="#parse" data-nav="parse"><svg class="icon"><use href="#i-scan"/></svg><span>手动解析</span></a>
+      <a href="#settings" data-nav="settings"><svg class="icon"><use href="#i-sliders"/></svg><span>偏好设置</span><span id="unsaved-dot" class="unsaved-dot" hidden></span></a>
+      <a href="#history" data-nav="history"><svg class="icon"><use href="#i-clock"/></svg><span>任务历史</span><span id="nav-active-count" class="nav-count" hidden></span></a>
+      <a href="#maintenance" data-nav="maintenance"><svg class="icon"><use href="#i-database"/></svg><span>缓存与诊断</span></a>
+    </nav>
+    <div class="sidebar-bottom"><div class="mini-monogram" aria-hidden="true">拾</div><p>把值得一看的讨论<br>留成一张好看的卡片。</p><div class="sidebar-version">ASTRBOT PLUGIN <span id="plugin-version">—</span></div></div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar"><div class="breadcrumb">控制台 <span>/</span> <strong id="view-title">工作总览</strong></div><div class="topbar-actions"><span id="connection-state" class="connection" data-state="connecting" role="status"><span></span>连接中</span><button id="reconnect-button" class="text-button" type="button" hidden>重新连接</button><button id="color-mode" class="icon-button" type="button" aria-label="切换深色模式" title="切换深色模式"><svg class="icon"><use href="#i-sun"/></svg></button></div></header>
+    <div id="connection-banner" class="connection-banner" role="alert" hidden></div>
+    <main id="main-content" tabindex="-1">
+      <section id="view-overview" class="view" aria-labelledby="overview-title">
+        <div class="page-heading"><div><p class="eyebrow">A LITTLE LIGHT, WELL KEPT</p><h1 id="overview-title">让好内容，<span>被好好看见。</span></h1><p class="lede">贴吧公开内容解析、图文卡片与分享，一处管理。</p></div><div class="date-block"><span id="today-day">—</span><div id="today-date">—</div></div></div>
+        <div class="stats-grid" aria-label="任务统计">
+          <article class="stat-card"><div class="stat-label">累计任务 <span class="stat-index">01</span></div><div class="stat-value" data-stat="total">—</div><div class="stat-note">本地任务记录</div></article>
+          <article class="stat-card"><div class="stat-label">成功生成 <span class="stat-index">02</span></div><div class="stat-value" data-stat="success">—</div><div class="stat-note"><span class="small-dot success"></span><span id="success-rate">等待数据</span></div></article>
+          <article class="stat-card"><div class="stat-label">缓存命中 <span class="stat-index">03</span></div><div class="stat-value" data-stat="cache_hits">—</div><div class="stat-note">相同内容，更快到达</div></article>
+          <article class="stat-card"><div class="stat-label">正在处理 <span class="stat-index">04</span></div><div class="stat-value" data-stat="active">—</div><div class="stat-note" id="active-note">等待连接</div></article>
+        </div>
+        <div class="overview-grid"><div class="overview-main">
+          <article class="quick-parse panel-dark"><div class="panel-kicker">从一个链接开始 <span>START HERE</span></div><h2>下一段好讨论，<br>值得留下来。</h2><form id="quick-form"><label class="sr-only" for="quick-input">贴吧链接或分享内容</label><div class="quick-input-wrap"><svg class="icon"><use href="#i-link"/></svg><input id="quick-input" type="text" maxlength="20000" placeholder="粘贴贴吧链接、分享卡片或小程序内容" autocomplete="off"><button class="light-button" type="submit">去解析 <svg class="icon"><use href="#i-arrow"/></svg></button></div></form><div class="quick-footer"><span><span class="small-dot"></span>帖子 · 吧首页 · 公开主页</span><span>保留图文顺序与回复层级</span></div></article>
+          <article class="panel activity-panel"><div class="panel-heading"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>最近的拾光</h2></div><a class="subtle-link" href="#history">全部记录 <svg class="icon"><use href="#i-arrow"/></svg></a></div><div id="recent-jobs" class="job-list"><div class="empty-state compact"><svg class="icon"><use href="#i-clock"/></svg><p>连接后显示最近的解析任务</p></div></div></article>
+        </div><div class="overview-side">
+          <article class="panel style-panel">
+            <div class="panel-heading"><div><p class="eyebrow">主题与阅读</p><h2>选一种喜欢的气质</h2></div><span class="small-label">六种主题</span></div>
+            <div id="sample-themes" class="theme-pills" role="tablist" aria-label="卡片主题示意"></div>
+            <div id="style-sample" class="style-sample" data-theme="denia" role="tabpanel" aria-labelledby="sample-tab-denia" tabindex="0">
+              <div class="sample-brand">闲聊吧<span>主题排版示意</span></div>
+              <div class="sample-heading"><div><div id="sample-theme-name" class="sample-eyebrow"></div><h3>留住一段有意思的对话。</h3></div><div id="sample-motif" class="sample-motif" aria-hidden="true"></div></div>
+              <div class="sample-author"><span>拾</span><div>示例用户<small>1 楼 · 楼主</small></div></div>
+              <p>文字、图片和认真写下的回复，<br>按原来的顺序，好好放在一起。</p>
+              <div class="sample-reply"><strong>路过的人</strong><span>这样的讨论，值得慢慢看。</span></div>
+              <div id="sample-font" class="sample-foot"></div>
+            </div>
+            <p id="sample-theme-description" class="theme-description" aria-live="polite"></p>
+            <p class="field-help sample-caption">样式示意 · 实际结果以卡片预览为准</p>
+          </article>
+          <article class="panel pulse-panel"><div class="panel-heading"><div><p class="eyebrow">A QUIET RHYTHM</p><h2>近期任务分布</h2></div><span class="small-label">近 7 天</span></div><div id="activity-chart" class="activity-chart" role="img" aria-label="等待历史数据"><span class="chart-empty">暂无任务记录</span></div><p class="field-help">根据当前已加载的历史记录计算</p></article>
+        </div></div>
+      </section>
+
+      <section id="view-parse" class="view" aria-labelledby="parse-title" hidden>
+        <div class="page-heading"><div><p class="eyebrow">CAPTURE SOMETHING GOOD</p><h1 id="parse-title">手动解析<span>与预览</span></h1><p class="lede">粘贴分享内容，查看真实进度，导出完整结果。</p></div></div>
+        <div class="parse-layout"><div class="parse-controls"><form id="parse-form" class="panel" novalidate><div class="panel-heading"><h2>内容来源</h2><span class="small-label">01 / 输入</span></div><label class="field-label" for="parse-input">贴吧链接或分享内容</label><textarea id="parse-input" name="input" rows="6" maxlength="20000" placeholder="支持帖子链接、吧首页，以及含贴吧地址的 JSON / XML 分享卡片" aria-describedby="parse-input-help parse-input-error" required></textarea><p id="parse-input-help" class="field-help">一次可解析的链接数量由「偏好设置」决定。私密或受限页面可能无法获取。</p><p id="parse-input-error" class="field-error" role="alert" hidden></p><div class="form-divider"></div><div class="panel-heading"><h2>本次解析</h2><span class="small-label">02 / 样式</span></div><fieldset class="theme-fieldset"><legend class="field-label">卡片主题</legend><div id="parse-themes" class="theme-option-grid"></div></fieldset><label class="field parse-font-field" for="parse-font-override"><span class="field-label">卡片字体</span><select id="parse-font-override" name="font_override" aria-describedby="parse-font-help"></select><small class="field-help" id="parse-font-help">默认霞鹜文楷；自定义字体请先在偏好设置中上传。未上传时将回退霞鹜文楷。</small></label><div class="toggle-row"><label for="parse-single-image"><strong>优先生成整张长图</strong><small>完整连续排版，超过渲染长度时再续图</small></label><input class="switch" id="parse-single-image" name="single_image" type="checkbox" checked></div><div class="field-row"><label class="field"><span class="field-label">回复楼层数</span><input id="parse-comment-limit" name="comment_limit" type="number" min="0" max="100" value="12" required><small class="field-help">不含首楼，最多 100 楼</small></label><label class="field"><span class="field-label">回复排序</span><select name="sort" id="parse-sort"><option value="default">原楼层顺序</option><option value="latest">最新回复</option><option value="hot">点赞数从高到低</option></select></label></div><div class="toggle-row"><label for="parse-images"><strong>展示图片</strong><small>按原内容顺序保留配图</small></label><input class="switch" id="parse-images" name="include_images" type="checkbox" checked></div><div class="toggle-row"><label for="parse-only-author"><strong>只看楼主</strong><small>仅保留楼主发表的内容</small></label><input class="switch" id="parse-only-author" name="only_author" type="checkbox"></div><div class="toggle-row"><label for="parse-show-source"><strong>展示来源信息</strong><small>显示本次卡片底部来源链接、读取说明及收录/未展开数量提示</small></label><input class="switch" id="parse-show-source" name="show_source" type="checkbox" checked></div><div class="toggle-row"><label for="parse-original-images"><strong>聊天记录附带正文原图</strong><small>开启后 QQ 会将渲染卡片与正文原图放进同一条聊天记录，先卡片后原图，按帖子顺序排列</small></label><input class="switch" id="parse-original-images" name="forward_original_images" type="checkbox"></div><button id="parse-submit" class="primary-button full-width" type="submit" data-online disabled><svg class="icon"><use href="#i-scan"/></svg>开始解析 <svg class="icon trailing"><use href="#i-arrow"/></svg></button><p class="field-help form-footnote">本次选项不会修改全局偏好设置。</p></form><div class="note-card"><svg class="icon"><use href="#i-info"/></svg><p>整张长图会连续排版；关闭后按目标高度分页。图片与公开数据可能受源站限制，未收录内容会在结果中说明。</p></div></div>
+        <div class="parse-result"><article id="current-job" class="panel job-progress" hidden></article><article class="panel preview-panel"><div class="panel-heading"><div><p class="eyebrow">THE READING ROOM</p><h2>卡片预览</h2></div><span id="preview-pages-label" class="small-label">等待解析</span></div><div id="preview-toolbar" class="preview-toolbar" hidden><div class="page-switch"><button id="preview-prev" class="icon-button" type="button" aria-label="上一页"><svg class="icon flip"><use href="#i-chevron"/></svg></button><span id="preview-page-number" aria-live="polite">1 / 1</span><button id="preview-next" class="icon-button" type="button" aria-label="下一页"><svg class="icon"><use href="#i-chevron"/></svg></button></div><div class="export-actions"><label class="sr-only" for="export-format">导出格式</label><select id="export-format"><option value="png">当前页 PNG</option><option value="zip">全部卡片 ZIP</option><option value="markdown">正文 Markdown</option><option value="json">原始 JSON</option></select><button id="export-button" class="secondary-button" type="button" data-online disabled><svg class="icon"><use href="#i-download"/></svg>导出</button></div></div><div id="preview-surface" class="preview-surface"><div class="empty-state preview-empty"><div class="empty-art" aria-hidden="true"><div></div><div></div><div></div></div><h3>给一段讨论，一个新的版式。</h3><p>从左侧输入内容，完成解析后<br>真实卡片会出现在这里。</p></div></div><div id="document-details" class="document-details" hidden></div></article></div></div>
+      </section>
+
+      <section id="view-settings" class="view" aria-labelledby="settings-title" hidden>
+        <div class="page-heading"><div><p class="eyebrow">MAKE IT YOUR OWN</p><h1 id="settings-title">偏好设置<span>，恰到好处。</span></h1><p class="lede">调整内容范围、卡片样式、群聊规则与资源预算。</p></div><span id="settings-save-status" class="save-state" role="status">等待加载</span></div>
+        <form id="settings-form" novalidate><div id="settings-errors" class="error-summary" role="alert" tabindex="-1" hidden></div><div class="settings-layout"><nav id="settings-nav" class="settings-nav" aria-label="设置分区"></nav><div class="settings-content"><div id="settings-fields"></div><article class="panel settings-section" id="settings-groups"><div class="section-number">07</div><div class="panel-heading"><div><h2>分群覆盖</h2><p class="field-help">指定群聊使用自己的设置，其余选项继续跟随全局。</p></div><button id="add-group" class="secondary-button" type="button"><svg class="icon"><use href="#i-plus"/></svg>添加群聊</button></div><div id="group-overrides" class="group-overrides"></div><div class="form-divider"></div><label class="field-label" for="setting-blacklist">群聊黑名单</label><textarea id="setting-blacklist" name="blacklist" rows="3" placeholder="每行一个群号，也可用逗号或空格分隔" aria-describedby="blacklist-help"></textarea><p class="field-help" id="blacklist-help">这些群聊不自动解析内容。手动解析面板仍可使用。</p></article><article class="panel settings-section" id="settings-cookie"><div class="section-number">08</div><div class="panel-heading"><div><h2>源站凭据</h2><p class="field-help">可选。仅在公开接口需要登录时使用自己的贴吧 Cookie。</p></div><span id="cookie-status" class="status-badge neutral">等待加载</span></div><label class="field-label" for="setting-cookie">更新 Cookie</label><input id="setting-cookie" name="cookie" type="password" autocomplete="new-password" spellcheck="false" placeholder="留空则保留已保存的凭据" aria-describedby="cookie-help"><p id="cookie-help" class="field-help">凭据仅写入后端，面板不会回显已保存的内容。请勿粘贴到群聊或诊断记录。</p><label class="checkbox-label"><input id="clear-cookie" type="checkbox">删除已保存的 Cookie</label></article></div></div><div class="settings-savebar"><span><span id="savebar-dot" class="small-dot"></span><span id="savebar-text">所有变更统一保存</span></span><div><button id="settings-reset" class="secondary-button" type="button" data-online disabled>撤销未保存更改</button><button id="settings-save" class="primary-button" type="submit" data-online disabled><svg class="icon"><use href="#i-check"/></svg>保存设置</button></div></div></form>
+      </section>
+
+      <section id="view-history" class="view" aria-labelledby="history-title" hidden>
+        <div class="page-heading"><div><p class="eyebrow">EVERY CAPTURE, IN ORDER</p><h1 id="history-title">每一份拾光<span>，都有记录。</span></h1><p class="lede">查看状态、回到预览，或重新处理未完成的任务。</p></div><button class="secondary-button" id="history-refresh" type="button" data-online disabled><svg class="icon"><use href="#i-refresh"/></svg>刷新记录</button></div><article class="panel history-panel"><div class="history-filters"><label class="search-field"><svg class="icon"><use href="#i-scan"/></svg><span class="sr-only">搜索标题或链接</span><input id="history-search" type="search" placeholder="搜索标题或链接"></label><label><span class="sr-only">按任务状态筛选</span><select id="history-filter"><option value="all">全部状态</option><option value="done">已完成</option><option value="active">处理中</option><option value="failed">失败</option></select></label></div><div id="history-table" class="table-wrapper"></div><div class="history-footer"><span id="history-count">等待加载</span><button id="history-clear" type="button" class="text-button danger-text" data-online disabled>清空已完成记录</button></div></article>
+      </section>
+
+      <section id="view-maintenance" class="view" aria-labelledby="maintenance-title" hidden>
+        <div class="page-heading"><div><p class="eyebrow">KEEP THE WORKSPACE CLEAR</p><h1 id="maintenance-title">轻装运行<span>，状态透明。</span></h1><p class="lede">管理缓存与留存记录，获取可核对的诊断信息。</p></div></div><div class="maintenance-grid"><article class="panel cache-panel"><div class="panel-heading"><div><p class="eyebrow">LOCAL STORAGE</p><h2>内容缓存</h2></div><svg class="icon large-icon"><use href="#i-database"/></svg></div><div class="storage-number"><span id="cache-size">—</span><small id="cache-limit">等待加载</small></div><div class="storage-meter"><span id="cache-meter" style="width:0%"></span></div><div class="storage-meta"><span id="cache-entries">— 条缓存</span><span id="cache-policy">—</span></div><p class="field-help">缓存可复用近期解析结果。清理后，后续访问将重新从源站获取。</p><button id="cache-clear" class="secondary-button" type="button" data-online disabled><svg class="icon"><use href="#i-trash"/></svg>清理内容缓存</button></article><article class="panel capability-panel"><div class="panel-heading"><div><p class="eyebrow">CONNECTED CAPABILITIES</p><h2>服务能力</h2></div><span class="small-label">来自后端</span></div><div id="capability-list" class="capability-list"><p class="field-help">连接后读取当前服务能力。</p></div></article></div><article class="panel diagnostics-panel"><div class="panel-heading"><div><p class="eyebrow">UNDER THE SURFACE</p><h2>运行诊断</h2><p class="field-help">包含抓取、渲染和存储的实际状态，不含 Cookie 明文。</p></div><div class="button-row"><button id="diagnostics-copy" class="secondary-button" type="button" disabled>复制诊断</button><button id="diagnostics-refresh" class="primary-button" type="button" data-online disabled><svg class="icon"><use href="#i-refresh"/></svg>读取诊断</button></div></div><pre id="diagnostics-output" tabindex="0">尚未读取。点击「读取诊断」获取当前运行状态。</pre></article>
+      </section>
+      <footer class="main-footer"><span>贴吧拾光 / TIEBA LENS</span><span>仅呈现本次可读取的公开内容</span></footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="confirm-dialog"><form method="dialog"><p class="eyebrow">WORKSPACE MANAGEMENT</p><h2 id="confirm-title">确认操作</h2><p id="confirm-description"></p><div class="dialog-actions"><button class="secondary-button" value="cancel">取消</button><button class="primary-button danger-button" id="confirm-accept" value="confirm">确认清理</button></div></form></dialog>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

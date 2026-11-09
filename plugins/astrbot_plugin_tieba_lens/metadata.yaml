@@ -1,0 +1,17 @@
+name: astrbot_plugin_tieba_lens
+display_name: 贴吧拾光
+repo: https://github.com/yuukana1/astrbot_plugin_tieba_lens
+desc: |
+  自动识别贴吧链接、分享卡片与小程序，将图文帖子、吧主页及用户主页排成精美卡片。
+  支持头像昵称、真实吧等级、顺序图文表情、可配置评论与楼中楼、长帖分页、合并转发、群黑名单、分群规则和贴表情进度。
+  内置中文控制台，支持解析预览、六主题、霞鹜文楷与自定义字体、直接长图、任务重试、PNG/Markdown/JSON/ZIP 导出与缓存维护。
+short_desc: 把贴吧图文与讨论，收进一张好看的卡片。
+version: 1.2.2
+author: yuukana
+astrbot_version: ">=4.24.1,<5"
+support_platforms:
+  - aiocqhttp
+tags:
+  - 贴吧
+  - 链接解析
+  - 分享卡片

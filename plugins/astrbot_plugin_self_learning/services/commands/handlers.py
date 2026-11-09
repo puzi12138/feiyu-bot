@@ -1,0 +1,628 @@
+"""插件命令业务逻辑实现 — admin 命令的处理体"""
+import time
+from typing import Any, AsyncGenerator
+
+from astrbot.api import logger
+
+from ...statics.messages import CommandMessages, LogMessages
+from ...utils.persona_selection import get_event_persona_scope
+
+
+class PluginCommandHandlers:
+    """6 个 @filter.command 命令的业务逻辑（从 main.py 提取）"""
+
+    def __init__(
+        self,
+        plugin_config: Any,
+        service_factory: Any,
+        message_collector: Any,
+        persona_manager: Any,
+        progressive_learning: Any,
+        affection_manager: Any,
+        temporary_persona_updater: Any,
+        db_manager: Any,
+        llm_adapter: Any,
+        remember_service: Any = None,
+        v2_integration: Any = None,
+    ):
+        self._config = plugin_config
+        self._service_factory = service_factory
+        self._message_collector = message_collector
+        self._persona_manager = persona_manager
+        self._progressive_learning = progressive_learning
+        self._affection_manager = affection_manager
+        self._temporary_persona_updater = temporary_persona_updater
+        self._db_manager = db_manager
+        self._llm_adapter = llm_adapter
+        self._remember_service = remember_service
+        self._v2_integration = v2_integration
+        self._force_learning_in_progress: set = set()
+
+    # learning_status
+
+    async def learning_status(self, event: Any) -> AsyncGenerator:
+        """查看学习状态"""
+        try:
+            group_id = event.get_group_id() or event.get_sender_id()
+
+            collector_stats = await self._message_collector.get_statistics(group_id)
+            if collector_stats is None:
+                collector_stats = {
+                    "total_messages": 0,
+                    "filtered_messages": 0,
+                    "raw_messages": 0,
+                    "unprocessed_messages": 0,
+                }
+
+            current_persona_info = await self._persona_manager.get_current_persona(group_id)
+            current_persona_name = CommandMessages.STATUS_UNKNOWN
+            if current_persona_info and isinstance(current_persona_info, dict):
+                current_persona_name = current_persona_info.get("name", CommandMessages.STATUS_UNKNOWN)
+
+            learning_status = await self._progressive_learning.get_learning_status()
+            if learning_status is None:
+                learning_status = {
+                    "learning_active": False,
+                    "current_session": None,
+                    "total_sessions": 0,
+                }
+
+            status_info = CommandMessages.STATUS_REPORT_HEADER.format(group_id=group_id)
+
+            persona_update_mode = (
+                "PersonaManager模式"
+                if self._config.use_persona_manager_updates
+                else "传统文件模式"
+            )
+            status_info += CommandMessages.STATUS_BASIC_CONFIG.format(
+                message_capture=(
+                    CommandMessages.STATUS_ENABLED
+                    if self._config.enable_message_capture
+                    else CommandMessages.STATUS_DISABLED
+                ),
+                auto_learning=(
+                    CommandMessages.STATUS_ENABLED
+                    if self._config.enable_auto_learning
+                    else CommandMessages.STATUS_DISABLED
+                ),
+                realtime_learning=(
+                    CommandMessages.STATUS_ENABLED
+                    if self._config.enable_realtime_learning
+                    else CommandMessages.STATUS_DISABLED
+                ),
+                web_interface=(
+                    CommandMessages.STATUS_ENABLED
+                    if self._config.enable_web_interface
+                    else CommandMessages.STATUS_DISABLED
+                ),
+            )
+
+            status_info += f"\n\n 人格更新配置:\n"
+            status_info += f"• 更新方式: {persona_update_mode}\n"
+            if self._config.use_persona_manager_updates:
+                persona_manager_updater = self._service_factory.create_persona_manager_updater()
+                pm_status = " 可用" if persona_manager_updater.is_available() else " 不可用"
+                status_info += f"• PersonaManager状态: {pm_status}\n"
+                status_info += f"• 自动应用更新: {'启用' if self._config.auto_apply_persona_updates else '禁用'}\n"
+            status_info += f"• 更新前备份: {'启用' if self._config.persona_update_backup_enabled else '禁用'}\n"
+
+            status_info += CommandMessages.STATUS_CAPTURE_SETTINGS.format(
+                target_qq=(
+                    self._config.target_qq_list
+                    if self._config.target_qq_list
+                    else CommandMessages.STATUS_ALL_USERS
+                ),
+                current_persona=current_persona_name,
+            )
+
+            if self._llm_adapter:
+                provider_info = self._llm_adapter.get_provider_info()
+                status_info += CommandMessages.STATUS_MODEL_CONFIG.format(
+                    filter_model=provider_info.get("filter", "未配置"),
+                    refine_model=provider_info.get("refine", "未配置"),
+                )
+            else:
+                status_info += CommandMessages.STATUS_MODEL_CONFIG.format(
+                    filter_model="未配置框架Provider",
+                    refine_model="未配置框架Provider",
+                )
+
+            current_session = learning_status.get("current_session") or {}
+            status_info += CommandMessages.STATUS_LEARNING_STATS.format(
+                total_messages=collector_stats.get("total_messages", 0),
+                filtered_messages=collector_stats.get("filtered_messages", 0),
+                style_updates=current_session.get("style_updates", 0),
+                last_learning_time=current_session.get(
+                    "end_time", CommandMessages.STATUS_NEVER_EXECUTED
+                ),
+            )
+
+            status_info += CommandMessages.STATUS_STORAGE_STATS.format(
+                raw_messages=collector_stats.get("raw_messages", 0),
+                unprocessed_messages=collector_stats.get("unprocessed_messages", 0),
+                filtered_messages=collector_stats.get("filtered_messages", 0),
+            )
+
+            scheduler_status = (
+                CommandMessages.STATUS_RUNNING
+                if learning_status.get("learning_active")
+                else CommandMessages.STATUS_STOPPED
+            )
+            status_info += "\n\n" + CommandMessages.STATUS_SCHEDULER.format(
+                status=scheduler_status
+            )
+
+            yield event.plain_result(status_info.strip())
+
+        except Exception as e:
+            logger.error(
+                CommandMessages.ERROR_GET_LEARNING_STATUS.format(error=e),
+                exc_info=True,
+            )
+            yield event.plain_result(
+                CommandMessages.STATUS_QUERY_FAILED.format(error=str(e))
+            )
+
+    # start_learning
+
+    async def start_learning(self, event: Any) -> AsyncGenerator:
+        """手动启动学习"""
+        try:
+            group_id = event.get_group_id() or event.get_sender_id()
+
+            stats = await self._message_collector.get_statistics(group_id)
+            unprocessed_count = stats.get("unprocessed_messages", 0)
+
+            if unprocessed_count < self._config.min_messages_for_learning:
+                yield event.plain_result(
+                    f" 未处理消息数量不足"
+                    f"（{unprocessed_count}/{self._config.min_messages_for_learning}），"
+                    f"无法开始学习"
+                )
+                return
+
+            yield event.plain_result(
+                f" 开始执行学习批次，处理 {unprocessed_count} 条未处理消息..."
+            )
+
+            try:
+                await self._progressive_learning._execute_learning_batch(group_id, from_force_learning=True)
+                yield event.plain_result(" 学习批次执行完成")
+            except Exception as batch_error:
+                yield event.plain_result(f" 学习批次执行失败: {str(batch_error)}")
+
+        except Exception as e:
+            logger.error(
+                CommandMessages.ERROR_START_LEARNING.format(error=e), exc_info=True
+            )
+            yield event.plain_result(
+                CommandMessages.STARTUP_FAILED.format(error=str(e))
+            )
+
+    # stop_learning
+
+    async def stop_learning(self, event: Any) -> AsyncGenerator:
+        """停止学习"""
+        try:
+            group_id = event.get_group_id() or event.get_sender_id()
+            await self._progressive_learning.stop_learning()
+            yield event.plain_result(
+                CommandMessages.LEARNING_STOPPED.format(group_id=group_id)
+            )
+        except Exception as e:
+            logger.error(
+                CommandMessages.ERROR_STOP_LEARNING.format(error=e), exc_info=True
+            )
+            yield event.plain_result(
+                CommandMessages.STOP_FAILED.format(error=str(e))
+            )
+
+    # force_learning
+
+    async def force_learning(self, event: Any) -> AsyncGenerator:
+        """强制执行一次学习周期"""
+        try:
+            group_id = event.get_group_id() or event.get_sender_id()
+            yield event.plain_result(
+                CommandMessages.FORCE_LEARNING_START.format(group_id=group_id)
+            )
+
+            if group_id in self._force_learning_in_progress:
+                yield event.plain_result(
+                    f" 群组 {group_id} 的强制学习正在进行中，请等待完成"
+                )
+                return
+
+            self._force_learning_in_progress.add(group_id)
+            try:
+                await self._progressive_learning._execute_learning_batch(group_id, from_force_learning=True)
+                yield event.plain_result(
+                    CommandMessages.FORCE_LEARNING_COMPLETE.format(group_id=group_id)
+                )
+            finally:
+                self._force_learning_in_progress.discard(group_id)
+
+        except Exception as e:
+            logger.error(
+                CommandMessages.ERROR_FORCE_LEARNING.format(error=e), exc_info=True
+            )
+            yield event.plain_result(
+                CommandMessages.ERROR_FORCE_LEARNING.format(error=str(e))
+            )
+
+    # remember
+
+    async def remember(self, event: Any) -> AsyncGenerator:
+        """手动记住一段对话上下文并链入表达方式和对话示例。"""
+        try:
+            if not self._remember_service:
+                yield event.plain_result("remember 服务未初始化，请检查启动日志")
+                return
+
+            payload = self._extract_command_payload(event, "remember")
+            quoted_context = self._extract_referenced_text(event)
+            content = self._merge_remember_payload(quoted_context, payload)
+            if not content:
+                yield event.plain_result(
+                    "使用方法：/remember <引用或上下文> => <期望表达示例>\n"
+                    "也可只写：/remember <需要记住的上下文>"
+                )
+                return
+
+            group_id = event.get_group_id() or event.get_sender_id()
+            sender_id = event.get_sender_id()
+            persona_id = get_event_persona_scope(event, self._config)
+            result = await self._remember_service.remember(
+                group_id=group_id,
+                sender_id=sender_id,
+                content=content,
+                persona_id=persona_id,
+            )
+
+            yield event.plain_result(
+                "已记住这段对话上下文，并同步到表达方式和对话示例。\n"
+                f"• memory_id: {result.memory_id}\n"
+                f"• exemplar_id: {result.exemplar_id or '未生成'}\n"
+                f"• style_review_id: {result.style_review_id or '未生成'}"
+            )
+
+        except ValueError as e:
+            yield event.plain_result(f"remember 失败：{e}")
+        except Exception as e:
+            logger.error(f"remember 命令处理失败: {e}", exc_info=True)
+            yield event.plain_result(f"remember 失败：{str(e)}")
+
+    # clean_rag_cache
+
+    async def clean_rag_cache(self, event: Any) -> AsyncGenerator:
+        """清理 LightRAG LLM 响应缓存（issue #253 维护入口）
+
+        用法：``/clean_rag_cache`` 清理全部群；``/clean_rag_cache 12345`` 或
+        空格/逗号分隔的多个群号只清理指定群。
+        """
+        try:
+            knowledge_manager = getattr(
+                self._v2_integration, "_knowledge_manager", None
+            )
+            if not hasattr(knowledge_manager, "clear_llm_response_cache"):
+                yield event.plain_result(
+                    "当前知识引擎不是 lightrag，无需清理 LightRAG 缓存"
+                )
+                return
+
+            payload = self._extract_command_payload(event, "clean_rag_cache")
+            group_ids = [
+                group_id
+                for group_id in payload.replace(",", " ").split()
+                if group_id
+            ]
+
+            yield event.plain_result("正在清理 LightRAG LLM 响应缓存...")
+            result = await knowledge_manager.clear_llm_response_cache(
+                group_ids=group_ids or None
+            )
+
+            freed_mb = result.get("freed_bytes", 0) / 1024 / 1024
+            cleared = result.get("cleared", []) or []
+            errors = result.get("errors", []) or []
+            if group_ids:
+                lines = [
+                    f"清理完成：指定 {len(group_ids)} 个群，"
+                    f"涉及 {len(cleared)} 个群，释放 {freed_mb:.1f} MB"
+                ]
+            else:
+                lines = [f"清理完成：{len(cleared)} 个群，释放 {freed_mb:.1f} MB"]
+            if cleared:
+                lines.append("涉及群组: " + ", ".join(str(g) for g in cleared))
+            for error in errors:
+                lines.append(f"失败: {error}")
+            yield event.plain_result("\n".join(lines))
+
+        except Exception as e:
+            logger.error(f"clean_rag_cache 命令处理失败: {e}", exc_info=True)
+            yield event.plain_result(f"清理 LightRAG 缓存失败：{str(e)}")
+
+    # affection_status
+
+    async def affection_status(self, event: Any) -> AsyncGenerator:
+        """查看好感度状态"""
+        try:
+            group_id = event.get_group_id() or event.get_sender_id()
+            user_id = event.get_sender_id()
+
+            if not self._config.enable_affection_system:
+                yield event.plain_result(CommandMessages.AFFECTION_DISABLED)
+                return
+
+            if not self._affection_manager:
+                yield event.plain_result("好感度管理器未初始化，请检查启动日志")
+                return
+
+            affection_status = await self._affection_manager.get_affection_status(group_id)
+
+            current_mood = None
+            if self._config.enable_startup_random_mood:
+                current_mood = await self._affection_manager.ensure_mood_for_group(group_id)
+            else:
+                current_mood = await self._affection_manager.get_current_mood(group_id)
+
+            user_affection = await self._db_manager.get_user_affection(group_id, user_id)
+            user_level = user_affection["affection_level"] if user_affection else 0
+
+            status_info = CommandMessages.AFFECTION_STATUS_HEADER.format(group_id=group_id)
+            status_info += "\n\n" + CommandMessages.AFFECTION_USER_LEVEL.format(
+                user_level=user_level, max_affection=self._config.max_user_affection
+            )
+            status_info += "\n" + CommandMessages.AFFECTION_TOTAL_STATUS.format(
+                total_affection=affection_status["total_affection"],
+                max_total_affection=affection_status["max_total_affection"],
+            )
+            status_info += "\n" + CommandMessages.AFFECTION_USER_COUNT.format(
+                user_count=affection_status["user_count"]
+            )
+            status_info += "\n\n" + CommandMessages.AFFECTION_CURRENT_MOOD
+
+            if current_mood:
+                mood_info = current_mood
+                status_info += "\n" + CommandMessages.AFFECTION_MOOD_TYPE.format(
+                    mood_type=mood_info.mood_type.value
+                )
+                status_info += "\n" + CommandMessages.AFFECTION_MOOD_INTENSITY.format(
+                    intensity=mood_info.intensity
+                )
+                status_info += "\n" + CommandMessages.AFFECTION_MOOD_DESCRIPTION.format(
+                    description=mood_info.description
+                )
+            else:
+                status_info += "\n" + CommandMessages.AFFECTION_NO_MOOD
+
+            if affection_status["top_users"]:
+                status_info += "\n\n" + CommandMessages.AFFECTION_TOP_USERS
+                for i, user in enumerate(affection_status["top_users"][:3], 1):
+                    status_info += "\n" + CommandMessages.AFFECTION_USER_RANK.format(
+                        rank=i,
+                        user_id=user["user_id"],
+                        affection_level=user["affection_level"],
+                    )
+
+            yield event.plain_result(status_info)
+
+        except Exception as e:
+            logger.error(
+                CommandMessages.ERROR_GET_AFFECTION_STATUS.format(error=e),
+                exc_info=True,
+            )
+            yield event.plain_result(
+                CommandMessages.ERROR_GET_AFFECTION_STATUS.format(error=str(e))
+            )
+
+    # set_mood
+
+    async def set_mood(self, event: Any) -> AsyncGenerator:
+        """手动设置 bot 情绪（通过增量人格更新）"""
+        try:
+            if not self._config.enable_affection_system:
+                yield event.plain_result(CommandMessages.AFFECTION_DISABLED)
+                return
+
+            if not self._temporary_persona_updater:
+                yield event.plain_result("临时人格更新器未初始化，无法设置情绪")
+                return
+
+            if not self._affection_manager:
+                yield event.plain_result("好感度管理器未初始化，无法设置情绪")
+                return
+
+            args = event.get_message_str().split()[1:]
+            if len(args) < 1:
+                yield event.plain_result(
+                    "使用方法：/set_mood <mood_type>\n"
+                    "可用情绪: happy, sad, excited, calm, angry, "
+                    "anxious, playful, serious, nostalgic, curious"
+                )
+                return
+
+            group_id = event.get_group_id() or event.get_sender_id()
+            mood_type = args[0].lower()
+
+            valid_moods = {
+                "happy": "心情很好，说话比较活泼开朗，容易表达正面情感",
+                "sad": "心情有些低落，说话比较温和，需要更多的理解和安慰",
+                "excited": "很兴奋，说话比较有活力，对很多事情都很感兴趣",
+                "calm": "心情平静，说话比较稳重，给人安全感",
+                "angry": "心情不太好，说话可能比较直接，不太有耐心",
+                "anxious": "有些紧张不安，说话可能比较谨慎，需要更多确认",
+                "playful": "心情很调皮，喜欢开玩笑，说话比较幽默风趣",
+                "serious": "比较严肃认真，说话简洁直接，专注于重要的事情",
+                "nostalgic": "有些怀旧情绪，说话带有回忆色彩，比较感性",
+                "curious": "对很多事情都很好奇，喜欢提问和探索新事物",
+            }
+
+            if mood_type not in valid_moods:
+                yield event.plain_result(
+                    f" 无效的情绪类型。支持的情绪: {', '.join(valid_moods.keys())}"
+                )
+                return
+
+            mood_description = valid_moods[mood_type]
+
+            persona_success = (
+                await self._temporary_persona_updater.apply_mood_based_persona_update(
+                    group_id, mood_type, mood_description
+                )
+            )
+
+            # 同时在 affection_manager 中记录情绪状态
+            from ...services.state import MoodType, BotMood
+
+            affection_success = False
+            try:
+                mood_enum = MoodType(mood_type)
+                await self._affection_manager.db_manager.save_bot_mood(
+                    group_id,
+                    mood_type,
+                    0.7,
+                    mood_description,
+                    self._config.mood_persistence_hours or 24,
+                )
+                mood_obj = BotMood(
+                    mood_type=mood_enum,
+                    intensity=0.7,
+                    description=mood_description,
+                    start_time=time.time(),
+                    duration_hours=self._config.mood_persistence_hours or 24,
+                )
+                self._affection_manager.current_moods[group_id] = mood_obj
+                affection_success = True
+            except Exception as e:
+                logger.warning(f"设置 affection_manager 情绪失败: {e}")
+
+            if persona_success:
+                status_msg = f" 情绪状态已设置为: {mood_type}\n描述: {mood_description}"
+                if not affection_success:
+                    status_msg += "\n 注意：情绪状态可能无法在状态查询中正确显示"
+                yield event.plain_result(status_msg)
+            else:
+                yield event.plain_result(" 设置情绪状态失败")
+
+        except Exception as e:
+            logger.error(
+                CommandMessages.ERROR_SET_MOOD.format(error=e), exc_info=True
+            )
+            yield event.plain_result(
+                CommandMessages.ERROR_SET_MOOD.format(error=str(e))
+            )
+
+    @staticmethod
+    def _extract_command_payload(event: Any, command_name: str) -> str:
+        message = event.get_message_str() or ""
+        stripped = message.strip()
+        if not stripped:
+            return ""
+
+        parts = stripped.split(maxsplit=1)
+        if not parts:
+            return ""
+        token = parts[0].lstrip("/!#.")
+        if token.lower() != command_name.lower():
+            return stripped
+        return parts[1].strip() if len(parts) > 1 else ""
+
+    @classmethod
+    def _merge_remember_payload(cls, quoted_context: str, payload: str) -> str:
+        quoted_context = (quoted_context or "").strip()
+        payload = (payload or "").strip()
+        if not quoted_context:
+            return payload
+        if not payload:
+            return quoted_context
+        if cls._looks_like_pair_payload(payload):
+            if payload.lstrip().startswith(("=>", "->", "→")):
+                return f"{quoted_context} {payload}"
+            return payload
+        return f"{quoted_context} => {payload}"
+
+    @staticmethod
+    def _looks_like_pair_payload(payload: str) -> bool:
+        return any(
+            marker in payload
+            for marker in ("=>", "->", "→", "回复：", "回答：", "回应：", "\nB:")
+        )
+
+    @classmethod
+    def _extract_referenced_text(cls, event: Any) -> str:
+        for getter_name in ("get_message", "get_messages", "get_raw_message"):
+            getter = getattr(event, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                text = cls._extract_text_from_candidate(getter())
+            except Exception:
+                continue
+            if text:
+                return text
+
+        for attr_name in ("raw_event", "raw", "message_obj", "message"):
+            try:
+                text = cls._extract_text_from_candidate(getattr(event, attr_name, None))
+            except Exception:
+                continue
+            if text:
+                return text
+        return ""
+
+    @classmethod
+    def _extract_text_from_candidate(cls, candidate: Any, depth: int = 0) -> str:
+        if candidate is None or depth > 4:
+            return ""
+        if isinstance(candidate, str):
+            return ""
+        if isinstance(candidate, dict):
+            for key in (
+                "quote",
+                "quoted_message",
+                "reply",
+                "reply_message",
+                "referenced_message",
+                "source",
+            ):
+                text = cls._extract_text_from_candidate(candidate.get(key), depth + 1)
+                if text:
+                    return text
+            for key in ("text", "message", "content", "raw_message"):
+                value = candidate.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return ""
+        if isinstance(candidate, (list, tuple)):
+            for item in candidate:
+                text = cls._extract_text_from_candidate(item, depth + 1)
+                if text:
+                    return text
+            return ""
+
+        class_name = type(candidate).__name__.lower()
+        candidate_type = str(
+            getattr(candidate, "type", "")
+            or getattr(candidate, "name", "")
+            or getattr(candidate, "component_type", "")
+        ).lower()
+        is_reference = any(
+            token in f"{class_name} {candidate_type}"
+            for token in ("reply", "quote", "source")
+        )
+        if is_reference:
+            for attr_name in ("text", "message", "content", "raw_message"):
+                value = getattr(candidate, attr_name, None)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+                text = cls._extract_text_from_candidate(value, depth + 1)
+                if text:
+                    return text
+
+        for attr_name in ("chain", "message", "messages", "components"):
+            value = getattr(candidate, attr_name, None)
+            text = cls._extract_text_from_candidate(value, depth + 1)
+            if text:
+                return text
+        return ""

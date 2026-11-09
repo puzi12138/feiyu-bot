@@ -1,0 +1,428 @@
+{
+  "schema_version": 1,
+  "archive_kind": "sanitized-source-archive",
+  "lock_completeness": "partial; known commits are fixed, non-Git source bases remain unknown",
+  "privacy": "Runtime state, credentials, account identity, histories, ledgers, media, model weights and binary distributions are excluded.",
+  "integrity": "Null sanitized snapshot hashes must be populated by the final export manifest after all redaction. Original production hashes are not reconstructed-source hashes.",
+  "components": [
+    {
+      "name": "AstrBot",
+      "source_kind": "git-upstream-with-reviewed-source-overlays",
+      "public_url": "https://github.com/AstrBotDevs/AstrBot.git",
+      "git_commit": "dffe922773725e9c178392c423676ad65044748c",
+      "version": null,
+      "license_evidence": "AGPL-3.0-or-later",
+      "new_manifest_candidates": [],
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "overlay_root": "upstream/overlays/AstrBot",
+      "upstream_source_paths_overlaid": [
+        "astrbot/core/agent/runners/tool_loop_agent_runner.py",
+        "astrbot/core/core_lifecycle.py",
+        "astrbot/core/pipeline/process_stage/follow_up.py",
+        "astrbot/core/utils/history_saver.py"
+      ]
+    },
+    {
+      "name": "dsh-bili-humanism",
+      "source_kind": "git-upstream-with-reviewed-source-overlays",
+      "public_url": "https://github.com/InariNGT-Ofiicial/dsh-bili-humanism.git",
+      "git_commit": "3eab34c6754749f3b3a97979c7ee6dd82136f607",
+      "version": null,
+      "license_evidence": "MIT",
+      "new_manifest_candidates": [
+        "pnpm-lock.yaml"
+      ],
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "overlay_root": "upstream/overlays/dsh-bili-humanism",
+      "upstream_source_paths_overlaid": [
+        "index.js",
+        "lib/journal-policy.mjs",
+        "lib/personality.mjs",
+        "lib/service.mjs",
+        "prompts/humanistic-reading.md"
+      ]
+    },
+    {
+      "name": "netease-cloud-api-upstream",
+      "source_kind": "external-git-dependency",
+      "public_url": "https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced.git",
+      "git_commit": "2db6684453297ee86dec0492842f2320b08182d9",
+      "version": null,
+      "license_evidence": "MIT",
+      "local_runtime_patch_paths": [],
+      "new_manifest_candidates": [],
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false
+    },
+    {
+      "name": "astrbot_plugin_ai_cover",
+      "source_kind": "external-not-redistributed",
+      "public_url": "https://github.com/tignioj/astrbot_plugin_ai_cover",
+      "git_commit": null,
+      "version": "1.6.0",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "GitHub repository accessible but license field null and /license returns 404; no redistribution grant established",
+      "reconstruction_verified": false,
+      "exclusion_reason": "Public archive omits both upstream and locally modified source until an applicable license or permission is obtained"
+    },
+    {
+      "name": "astrbot_plugin_bilibili_ai_bot",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/chenluQwQ/astrbot_plugin_bilibili_ai_bot",
+      "git_commit": null,
+      "version": "1.6.1",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "MIT",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_bilibili_ai_bot"
+    },
+    {
+      "name": "astrbot_plugin_image_companion",
+      "source_kind": "external-not-redistributed",
+      "public_url": "https://github.com/menglimi/astrbot_plugin_image_companion",
+      "git_commit": null,
+      "version": "0.4.5",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "GitHub repository accessible but license field null and /license returns 404; no redistribution grant established",
+      "reconstruction_verified": false,
+      "exclusion_reason": "Public archive omits both upstream and locally modified source until an applicable license or permission is obtained"
+    },
+    {
+      "name": "astrbot_plugin_private_companion",
+      "source_kind": "external-not-redistributed",
+      "public_url": "https://github.com/menglimi/astrbot_plugin_private_companion",
+      "git_commit": null,
+      "version": "6.5.6",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "GitHub repository accessible but license field null and /license returns 404; no redistribution grant established",
+      "reconstruction_verified": false,
+      "exclusion_reason": "Public archive omits both upstream and locally modified source until an applicable license or permission is obtained"
+    },
+    {
+      "name": "astrbot_plugin_proactive_chat",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/Pancakes-Labs/astrbot_plugin_proactive_chat",
+      "git_commit": null,
+      "version": "v1.2.6",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "AGPL v3 license text",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_proactive_chat"
+    },
+    {
+      "name": "astrbot_plugin_qzone",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/Zhalslar/astrbot_plugin_qzone",
+      "git_commit": null,
+      "version": "v3.1.3",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "GPL v3 license text",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_qzone"
+    },
+    {
+      "name": "astrbot_plugin_remember_you",
+      "source_kind": "external-not-redistributed",
+      "public_url": "https://github.com/menglimi/astrbot_plugin_remember_you",
+      "git_commit": null,
+      "version": "0.5.10",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "GitHub repository accessible but license field null and /license returns 404; no redistribution grant established",
+      "reconstruction_verified": false,
+      "exclusion_reason": "Public archive omits both upstream and locally modified source until an applicable license or permission is obtained"
+    },
+    {
+      "name": "astrbot_plugin_self_learning",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/NickCharlie/astrbot_plugin_self_learning",
+      "git_commit": null,
+      "version": "4.3.1",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "AGPL v3 license text; material-icons Apache-2.0 notice",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_self_learning"
+    },
+    {
+      "name": "astrbot_plugin_tieba_lens",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/yuukana1/astrbot_plugin_tieba_lens",
+      "git_commit": null,
+      "version": "1.2.2",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "MIT; OFL/font and vendor notices",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_tieba_lens"
+    },
+    {
+      "name": "astrbot_plugin_virtual_life",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/FloranceYeh/astrbot_plugin_virtual_life",
+      "git_commit": null,
+      "version": "v1.12.2",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "GPL v3 license text",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_virtual_life"
+    },
+    {
+      "name": "astrbot_plugin_xiaoheihe_adapter",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter",
+      "git_commit": null,
+      "version": "v1.3.3",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "MIT with THIRD_PARTY_NOTICES",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/astrbot_plugin_xiaoheihe_adapter"
+    },
+    {
+      "name": "feiyu_agent_soul",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": null,
+      "git_commit": null,
+      "version": "v1.0.0",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "No blanket license selected here; upstream material retains its own terms",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/feiyu_agent_soul",
+      "publication_authorization": "Project owner explicitly authorized publishing original local source"
+    },
+    {
+      "name": "feiyu_steward",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": null,
+      "git_commit": null,
+      "version": "1.0.68",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "No blanket license selected here; upstream material retains its own terms",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/feiyu_steward",
+      "publication_authorization": "Project owner explicitly authorized publishing original local source"
+    },
+    {
+      "name": "meme_manager",
+      "source_kind": "current-plugin-source-snapshot",
+      "public_url": "https://github.com/anka-afk/astrbot_plugin_meme_manager",
+      "git_commit": null,
+      "version": "5.1.0",
+      "version_evidence": "local plugin metadata only; exact upstream base unknown",
+      "license_evidence": "MIT",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "plugins/meme_manager"
+    },
+    {
+      "name": "dsh-bili-scroll",
+      "source_kind": "current-non-git-source-snapshot",
+      "public_url": "https://github.com/c1overzz/dsh-bili-scroll",
+      "git_commit": null,
+      "version": "0.1.18",
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "MIT, bundled bilibili-mcp separate notices",
+      "runtime_entry": "vendor/bilibili-mcp/mcp_server.py",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "runtime_source_deploy_note": "Copy reviewed vendor/bilibili-mcp/mcp_server.py from the source snapshot into a newly created local bili-duty directory. The reviewed installed runtime copy had identical SHA256; no data directory is bundled.",
+      "snapshot_root": "upstream/snapshots/dsh-bili-scroll"
+    },
+    {
+      "name": "dsh-agent-soul",
+      "source_kind": "current-non-git-source-snapshot",
+      "public_url": "https://github.com/cyanwell/dsh-agent-soul",
+      "git_commit": null,
+      "version": "0.1.0",
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "MIT, plugins/huanqi separate license",
+      "runtime_entry": "index.js",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "upstream/snapshots/dsh-agent-soul"
+    },
+    {
+      "name": "dsh-video-storyboard",
+      "source_kind": "current-non-git-source-snapshot",
+      "public_url": "https://github.com/SAOS-3624/dsh-video-storyboard",
+      "git_commit": null,
+      "version": "0.5.12",
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "Apache-2.0",
+      "runtime_entry": "bin/storyboard.mjs",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "upstream/snapshots/dsh-video-storyboard"
+    },
+    {
+      "name": "GPT-SoVITS",
+      "source_kind": "external-dependency-not-bundled",
+      "public_url": "https://github.com/RVC-Boss/GPT-SoVITS",
+      "git_commit": null,
+      "version": null,
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "MIT, bundled subcomponents separate licenses",
+      "runtime_entry": "api_v2.py",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false
+    },
+    {
+      "name": "RVC-AI-Cover-Service",
+      "source_kind": "current-non-git-source-snapshot",
+      "public_url": "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI",
+      "git_commit": null,
+      "version": null,
+      "version_evidence": "README hint only; service origin/base not established",
+      "license_evidence": "MIT, bundled subcomponents separate licenses",
+      "runtime_entry": "tools/ai_cover_service.py",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "upstream/snapshots/RVC-AI-Cover-Service",
+      "excluded_unresolved_source_subtree": "tools/uvr5/ (legacy source attribution does not establish origin/license of bsroformer.py)"
+    },
+    {
+      "name": "SnowLuma",
+      "source_kind": "external-dependency-not-bundled",
+      "public_url": null,
+      "git_commit": null,
+      "version": "2.0.3",
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "Package LICENSE missing; local EULA restricts redistribution",
+      "runtime_entry": null,
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false
+    },
+    {
+      "name": "stable-diffusion-cpp",
+      "source_kind": "external-dependency-not-bundled",
+      "public_url": null,
+      "git_commit": null,
+      "version": null,
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "Not established locally",
+      "runtime_entry": null,
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false
+    },
+    {
+      "name": "QQ",
+      "source_kind": "external-dependency-not-bundled",
+      "public_url": null,
+      "git_commit": null,
+      "version": null,
+      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "license_evidence": "Client distribution, not project source",
+      "runtime_entry": null,
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false
+    },
+    {
+      "name": "local-billing-portal",
+      "source_kind": "local-source-snapshot",
+      "public_url": null,
+      "git_commit": null,
+      "version": null,
+      "license_evidence": "No blanket license selected here; upstream material retains its own terms",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "upstream/local/deepseek-billing-portal",
+      "publication_authorization": "Project owner explicitly authorized publishing original local source"
+    },
+    {
+      "name": "local-netease-service",
+      "source_kind": "local-source-snapshot",
+      "public_url": null,
+      "git_commit": null,
+      "version": "1.0.0",
+      "license_evidence": "No blanket license selected here; upstream material retains its own terms",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "snapshot_root": "upstream/local/netease-listen",
+      "publication_authorization": "Project owner explicitly authorized publishing original local source"
+    },
+    {
+      "name": "local-native-bridge",
+      "source_kind": "local-source-snapshot",
+      "public_url": null,
+      "git_commit": null,
+      "version": null,
+      "license_evidence": "No blanket license selected here; upstream material retains its own terms",
+      "snapshot_hash_after_redaction": null,
+      "reconstruction_verified": false,
+      "integrity_note": "NativePilot fixed SHA256 checks must be regenerated from the complete reviewed rebuilt file set; retain integrity checks.",
+      "snapshot_root": "integrations/native-bridge",
+      "publication_authorization": "Project owner explicitly authorized publishing original local source"
+    },
+    {
+      "name": "NapCatQQ",
+      "source_kind": "external-bundle-plus-reviewed-integration-patch",
+      "public_url": "https://github.com/NapNeko/NapCatQQ",
+      "git_commit": null,
+      "version": "4.18.41",
+      "version_evidence": "directory label only; installed upstream bundle base not independently verified",
+      "license_evidence": "Obtain and retain applicable upstream license before redistribution",
+      "bundle_included": false,
+      "reconstruction_verified": false
+    },
+    {
+      "name": "ECharts legacy vendor",
+      "source_kind": "vendored-js-with-original-license-notice",
+      "version": "5.4.3",
+      "version_evidence": "The distributed legacy vendor JS exports t.version=5.4.3",
+      "public_url": "https://github.com/apache/echarts/tree/5.4.3",
+      "license_evidence": "Apache-2.0; exact-tag LICENSE and NOTICE retained",
+      "license_root": "plugins/astrbot_plugin_self_learning/web_res/static/vendor/licenses/echarts-5.4.3",
+      "reconstruction_verified": false
+    },
+    {
+      "name": "ZRender within legacy ECharts vendor",
+      "source_kind": "vendored-js-with-original-license",
+      "version": "5.4.4",
+      "version_evidence": "Legacy vendor zrender object declares version 5.4.4",
+      "public_url": "https://github.com/ecomfe/zrender/tree/5.4.4",
+      "license_evidence": "BSD-3-Clause; exact-tag LICENSE retained",
+      "license_root": "plugins/astrbot_plugin_self_learning/web_res/static/vendor/licenses/zrender-5.4.4",
+      "reconstruction_verified": false
+    }
+  ],
+  "archive_layout": {
+    "dependency_lock": "upstream/DEPENDENCIES.lock.json",
+    "git_source_overlays": [
+      "upstream/overlays/AstrBot/",
+      "upstream/overlays/dsh-bili-humanism/"
+    ],
+    "non_git_source_snapshots": [
+      "upstream/snapshots/dsh-bili-scroll/",
+      "upstream/snapshots/dsh-agent-soul/",
+      "upstream/snapshots/dsh-video-storyboard/",
+      "upstream/snapshots/RVC-AI-Cover-Service/"
+    ],
+    "local_services": [
+      "upstream/local/deepseek-billing-portal/",
+      "upstream/local/netease-listen/"
+    ],
+    "native_bridge": "integrations/native-bridge/",
+    "plugins": "plugins/",
+    "scripts": "scripts/"
+  },
+  "publication_scope": {
+    "visibility": "public",
+    "third_party_plugin_source_snapshots_included": 10,
+    "excluded_unlicensed_plugins": [
+      "astrbot_plugin_ai_cover",
+      "astrbot_plugin_image_companion",
+      "astrbot_plugin_private_companion",
+      "astrbot_plugin_remember_you"
+    ],
+    "owner_authored_source": "Included at owner direction; no blanket license invented",
+    "compiled_dashboard_echarts_chunk": "Exact built version not established; rebuild from web_src lock instead of redistributing the unidentified old compiled chunk"
+  }
+}

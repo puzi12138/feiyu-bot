@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>社交关系图谱分享</title>
+  <script>
+    (function () {
+      try {
+        var key = "sl-dashboard-theme";
+        var saved = localStorage.getItem(key);
+        var prefersDark =
+          window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var theme = saved === "dark" || saved === "light"
+          ? saved
+          : prefersDark
+            ? "dark"
+            : "light";
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.style.colorScheme = theme;
+      } catch (error) {
+        document.documentElement.setAttribute("data-theme", "light");
+        document.documentElement.style.colorScheme = "light";
+      }
+    })();
+  </script>
+  <script src="/static/vendor/echarts.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --panel-soft: #f8fafc;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --border-strong: #d1d5db;
+      --surface-hover: #edf2f7;
+      --input-bg: #ffffff;
+      --accent: #2563eb;
+      --accent-strong: #1d4ed8;
+      --selection: rgba(37, 99, 235, 0.16);
+      --shadow: 0 4px 14px rgba(0, 0, 0, 0.04);
+      --tooltip-bg: #ffffff;
+      --tooltip-border: #d1d5db;
+    }
+
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0d1218;
+      --panel: #111821;
+      --panel-soft: #0f1620;
+      --text: #e8edf3;
+      --muted: #8a96a3;
+      --border: #223040;
+      --border-strong: #304154;
+      --surface-hover: #162130;
+      --input-bg: #0f1620;
+      --accent: #60a5fa;
+      --accent-strong: #93c5fd;
+      --selection: rgba(96, 165, 250, 0.22);
+      --shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+      --tooltip-bg: #111821;
+      --tooltip-border: #324150;
+    }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+    }
+
+    ::selection {
+      background: var(--selection);
+      color: var(--text);
+    }
+
+    button, select {
+      font: inherit;
+      transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    button:focus-visible,
+    select:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      box-shadow: 0 0 0 4px var(--selection);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+
+    .card {
+      background: var(--panel);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+
+    .title {
+      margin: 0 0 6px;
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin: 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .stats {
+      margin-top: 14px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .toolbar-select {
+      min-width: 180px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px;
+      background: var(--input-bg);
+      color: var(--text);
+    }
+
+    .layout-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2px;
+      box-shadow: var(--shadow);
+    }
+
+    .layout-option {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .layout-option.active {
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    .layout-option:hover {
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+
+    .layout-option.active:hover {
+      background: var(--accent-strong);
+      color: #fff;
+    }
+
+    .stat-item {
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    #chart {
+      margin-top: 14px;
+      width: 100%;
+      height: 72vh;
+      min-height: 480px;
+    }
+
+    .error {
+      color: #f87171;
+      margin-top: 14px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1 class="title">社交关系图谱</h1>
+      <p class="subtitle">
+        可拖动节点、缩放查看。该页面仅用于浏览，不提供任何管理操作。
+      </p>
+      <div id="stats" class="stats"></div>
+      <div class="toolbar">
+        <label for="memberFilter" class="toolbar-label">筛选成员</label>
+        <select id="memberFilter" class="toolbar-select">
+          <option value="">全部成员</option>
+        </select>
+        <div class="layout-switch" aria-label="图谱布局">
+          <button id="layoutForce" class="layout-option active" type="button">力导向</button>
+          <button id="layoutCircular" class="layout-option" type="button">环形</button>
+        </div>
+      </div>
+      <div id="chart"></div>
+      <div id="error" class="error" style="display:none;"></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var token = {{ share_token | tojson }};
+      var themeKey = "sl-dashboard-theme";
+      var chartDom = document.getElementById("chart");
+      var chart = window.echarts ? window.echarts.init(chartDom) : null;
+      var statsEl = document.getElementById("stats");
+      var errorEl = document.getElementById("error");
+      var memberFilterEl = document.getElementById("memberFilter");
+      var layoutForceEl = document.getElementById("layoutForce");
+      var layoutCircularEl = document.getElementById("layoutCircular");
+
+      var themeFromDocument = document.documentElement.getAttribute("data-theme");
+      var currentTheme = themeFromDocument || "light";
+      var rawMembers = [];
+      var rawRelations = [];
+      var graphLayout = "force";
+      var graphPositionCache = {};
+      var graphLayoutSettled = {};
+      var activeLayoutKey = "";
+      var draggingNode = null;
+
+      function escapeHtml(value) {
+        return String(value == null ? "" : value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function readTheme() {
+        try {
+          var saved = localStorage.getItem(themeKey);
+          if (saved === "dark" || saved === "light") {
+            return saved;
+          }
+        } catch (error) {}
+        return themeFromDocument || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      }
+
+      function applyTheme(theme) {
+        currentTheme = theme === "dark" ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", currentTheme);
+        document.documentElement.style.colorScheme = currentTheme;
+        document.body.setAttribute("data-theme", currentTheme);
+        try {
+          localStorage.setItem(themeKey, currentTheme);
+        } catch (error) {}
+      }
+
+      function getTextColor() {
+        return getComputedStyle(document.body).getPropertyValue("--text").trim() || "#1f2937";
+      }
+
+      function getMutedColor() {
+        return getComputedStyle(document.body).getPropertyValue("--muted").trim() || "#6b7280";
+      }
+
+      function getBorderColor() {
+        return getComputedStyle(document.body).getPropertyValue("--border").trim() || "#e5e7eb";
+      }
+
+      function getTooltipBackground() {
+        return getComputedStyle(document.body).getPropertyValue("--tooltip-bg").trim() || (currentTheme === "dark" ? "#111821" : "#ffffff");
+      }
+
+      function getTooltipBorderColor() {
+        return getComputedStyle(document.body).getPropertyValue("--tooltip-border").trim() || getBorderColor();
+      }
+
+      function getPalette() {
+        return currentTheme === "dark"
+          ? ["#2dd4bf", "#60a5fa", "#f59e0b", "#22c55e", "#a78bfa", "#fb7185"]
+          : ["#0f766e", "#2563eb", "#d97706", "#15803d", "#7c3aed", "#db2777"];
+      }
+
+      function showError(message) {
+        errorEl.style.display = "block";
+        errorEl.textContent = message;
+      }
+
+      function formatExpiresAt(value) {
+        if (!value) return "-";
+        return String(value).replace("T", " ");
+      }
+
+      function setLayout(layout) {
+        graphLayout = layout === "circular" ? "circular" : "force";
+        if (layoutForceEl && layoutCircularEl) {
+          layoutForceEl.classList.toggle("active", graphLayout === "force");
+          layoutCircularEl.classList.toggle("active", graphLayout === "circular");
+        }
+        renderGraph(getFilteredGraphData());
+      }
+
+      function renderStats(graph, share) {
+        var items = [
+          "群组: " + escapeHtml(graph.group_id || "-"),
+          "成员: " + escapeHtml(graph.member_count || 0),
+          "关系: " + escapeHtml(graph.relation_count || 0),
+          "有效期至: " + escapeHtml(formatExpiresAt(share.expires_at)),
+        ];
+        statsEl.innerHTML = items
+          .map(function (x) {
+            return '<div class="stat-item">' + x + "</div>";
+          })
+          .join("");
+      }
+
+      function updateMemberFilter(members) {
+        if (!memberFilterEl) return;
+        var options = ['<option value="">全部成员</option>'];
+        members.forEach(function (m) {
+          var userId = String(m.user_id || "");
+          var displayName = m.nickname || userId;
+          options.push(
+            '<option value="' + escapeHtml(userId) + '">' + escapeHtml(displayName) + "</option>"
+          );
+        });
+        memberFilterEl.innerHTML = options.join("");
+      }
+
+      function getFilteredGraphData() {
+        var userId = memberFilterEl ? String(memberFilterEl.value || "") : "";
+        if (!userId) {
+          return buildData(rawMembers, rawRelations);
+        }
+
+        var filteredRelations = rawRelations.filter(function (r) {
+          var source = String(r.source || "");
+          var target = String(r.target || "");
+          return source === userId || target === userId;
+        });
+
+        var relatedIds = {};
+        relatedIds[userId] = true;
+        filteredRelations.forEach(function (r) {
+          if (r.source) relatedIds[String(r.source)] = true;
+          if (r.target) relatedIds[String(r.target)] = true;
+        });
+
+        var filteredMembers = rawMembers.filter(function (m) {
+          return !!relatedIds[String(m.user_id || "")];
+        });
+
+        return buildData(filteredMembers, filteredRelations);
+      }
+
+      function buildData(members, relations) {
+        var palette = getPalette();
+        var nodes = members.map(function (m, index) {
+          var msgCount = Number(m.message_count || 0);
+          return {
+            id: String(m.user_id || ""),
+            name: m.nickname || String(m.user_id || ""),
+            value: msgCount,
+            symbolSize: Math.max(16, Math.min(56, 10 + msgCount / 10)),
+            itemStyle: { color: palette[index % palette.length] },
+          };
+        });
+
+        var links = relations.map(function (r) {
+          var strength = Number(r.strength || 0);
+          return {
+            source: String(r.source || ""),
+            target: String(r.target || ""),
+            value: strength,
+            relationTypeText: r.type_text || "互动",
+            frequency: Number(r.frequency || 0),
+            lineStyle: {
+              width: Math.max(1, Math.min(8, strength * 4)),
+              opacity: 0.75,
+            },
+          };
+        });
+
+        return { nodes: nodes, links: links };
+      }
+
+      function clampNumber(value, min, max) {
+        return Math.max(min, Math.min(max, Number(value) || 0));
+      }
+
+      function graphNodeKey(node, index) {
+        var value = node && (node.id || node.name);
+        return value === undefined || value === null || value === ""
+          ? "node-" + (index || 0)
+          : String(value);
+      }
+
+      function graphHash(value) {
+        var hash = 2166136261;
+        var text = String(value);
+        for (var index = 0; index < text.length; index += 1) {
+          hash ^= text.charCodeAt(index);
+          hash = Math.imul(hash, 16777619);
+        }
+        return hash >>> 0;
+      }
+
+      function graphLayoutKey(data) {
+        var nodePart = data.nodes
+          .map(function (node, index) {
+            return graphNodeKey(node, index);
+          })
+          .join("|");
+        var linkPart = data.links
+          .map(function (link) {
+            return (link.source || "") + ">" + (link.target || "") + ":" + (link.value || "");
+          })
+          .join("|");
+        return "share:" + nodePart + ":" + linkPart;
+      }
+
+      function graphViewport() {
+        var width = Math.max(360, chart && chart.getWidth ? chart.getWidth() : 800);
+        var height = Math.max(300, chart && chart.getHeight ? chart.getHeight() : 520);
+        return {
+          width: width,
+          height: height,
+          minX: 48,
+          maxX: width - 48,
+          minY: 58,
+          maxY: height - 42,
+          centerX: width / 2,
+          centerY: Math.max(140, height / 2 + 12),
+        };
+      }
+
+      function validGraphPoint(point) {
+        return point && Number.isFinite(point.x) && Number.isFinite(point.y);
+      }
+
+      function initialGraphPoint(id, index, total, viewport) {
+        var hash = graphHash(id);
+        var angle = (index / Math.max(1, total)) * Math.PI * 2 + ((hash % 997) / 997) * 0.7;
+        var ring = 0.42 + ((hash % 100) / 100) * 0.46;
+        var radius = Math.min(viewport.width, viewport.height) * 0.42 * ring;
+        return {
+          x: clampNumber(viewport.centerX + Math.cos(angle) * radius, viewport.minX, viewport.maxX),
+          y: clampNumber(viewport.centerY + Math.sin(angle) * radius, viewport.minY, viewport.maxY),
+        };
+      }
+
+      function pruneGraphLayoutCaches(activeKey) {
+        var keys = Object.keys(graphPositionCache);
+        if (keys.length <= 8) {
+          return;
+        }
+        keys
+          .filter(function (key) {
+            return key !== activeKey;
+          })
+          .slice(0, Math.max(0, keys.length - 8))
+          .forEach(function (key) {
+            delete graphPositionCache[key];
+            delete graphLayoutSettled[key];
+          });
+      }
+
+      function computeStableGraphLayout(nodes, links, cache) {
+        var viewport = graphViewport();
+        var layoutNodes = nodes.map(function (node, index) {
+          var id = graphNodeKey(node, index);
+          var cached = cache[id];
+          var point = validGraphPoint(cached)
+            ? cached
+            : initialGraphPoint(id, index, nodes.length, viewport);
+          return {
+            id: id,
+            index: index,
+            x: clampNumber(point.x, viewport.minX, viewport.maxX),
+            y: clampNumber(point.y, viewport.minY, viewport.maxY),
+            vx: 0,
+            vy: 0,
+            radius: Math.max(12, Math.min(42, Number(node.symbolSize || 24) / 2 + 8)),
+            fixed: Boolean(cached && cached.fixed),
+          };
+        });
+        var byId = new Map(layoutNodes.map(function (node) {
+          return [node.id, node];
+        }));
+        var layoutLinks = links
+          .map(function (link) {
+            return {
+              source: byId.get(String(link.source || "")),
+              target: byId.get(String(link.target || "")),
+              value: Math.max(1, Number(link.value || 1)),
+            };
+          })
+          .filter(function (link) {
+            return link.source && link.target && link.source !== link.target;
+          });
+
+        if (layoutNodes.length <= 1) {
+          layoutNodes.forEach(function (node) {
+            cache[node.id] = { x: node.x, y: node.y, fixed: node.fixed };
+          });
+          return;
+        }
+
+        var area = Math.max(1, (viewport.maxX - viewport.minX) * (viewport.maxY - viewport.minY));
+        var baseDistance = clampNumber(Math.sqrt(area / layoutNodes.length) * 1.05, 54, 132);
+        var charge = baseDistance * baseDistance * 0.86;
+        var iterations = clampNumber(Math.round(190 - layoutNodes.length * 0.48), 64, 160);
+
+        for (var step = 0; step < iterations; step += 1) {
+          var alpha = 1 - step / iterations;
+          for (var i = 0; i < layoutNodes.length; i += 1) {
+            var a = layoutNodes[i];
+            for (var j = i + 1; j < layoutNodes.length; j += 1) {
+              var b = layoutNodes[j];
+              var dx = b.x - a.x;
+              var dy = b.y - a.y;
+              if (Math.abs(dx) + Math.abs(dy) < 0.01) {
+                var angle = (graphHash(a.id + ":" + b.id) % 628) / 100;
+                dx = Math.cos(angle);
+                dy = Math.sin(angle);
+              }
+              var distanceSq = Math.max(36, dx * dx + dy * dy);
+              var distance = Math.sqrt(distanceSq);
+              var push = (charge / distanceSq) * alpha;
+              var minDistance = a.radius + b.radius + 8;
+              var collision = distance < minDistance
+                ? (minDistance - distance) * 0.045 * alpha
+                : 0;
+              var fx = (dx / distance) * (push + collision);
+              var fy = (dy / distance) * (push + collision);
+              if (!a.fixed) {
+                a.vx -= fx;
+                a.vy -= fy;
+              }
+              if (!b.fixed) {
+                b.vx += fx;
+                b.vy += fy;
+              }
+            }
+          }
+
+          layoutLinks.forEach(function (link) {
+            var source = link.source;
+            var target = link.target;
+            var dx = target.x - source.x;
+            var dy = target.y - source.y;
+            var distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            var desired = clampNumber(baseDistance * (1.32 - Math.min(link.value, 6) * 0.055), 48, 150);
+            var pull = (distance - desired) * 0.018 * alpha;
+            dx /= distance;
+            dy /= distance;
+            if (!source.fixed) {
+              source.vx += dx * pull;
+              source.vy += dy * pull;
+            }
+            if (!target.fixed) {
+              target.vx -= dx * pull;
+              target.vy -= dy * pull;
+            }
+          });
+
+          layoutNodes.forEach(function (node) {
+            if (node.fixed) {
+              return;
+            }
+            node.vx += (viewport.centerX - node.x) * 0.006 * alpha;
+            node.vy += (viewport.centerY - node.y) * 0.006 * alpha;
+            node.vx *= 0.72;
+            node.vy *= 0.72;
+            node.x = clampNumber(node.x + node.vx, viewport.minX, viewport.maxX);
+            node.y = clampNumber(node.y + node.vy, viewport.minY, viewport.maxY);
+          });
+        }
+
+        layoutNodes.forEach(function (node) {
+          cache[node.id] = { x: node.x, y: node.y, fixed: node.fixed };
+        });
+      }
+
+      function prepareGraphNodesForRender(data) {
+        if (graphLayout !== "force") {
+          activeLayoutKey = "";
+          return data.nodes;
+        }
+
+        var layoutKey = graphLayoutKey(data);
+        activeLayoutKey = layoutKey;
+        graphPositionCache[layoutKey] = graphPositionCache[layoutKey] || {};
+        var cache = graphPositionCache[layoutKey];
+        var hasEveryPoint = data.nodes.every(function (node, index) {
+          return validGraphPoint(cache[graphNodeKey(node, index)]);
+        });
+
+        if (!graphLayoutSettled[layoutKey] || !hasEveryPoint) {
+          computeStableGraphLayout(data.nodes, data.links, cache);
+          graphLayoutSettled[layoutKey] = true;
+          pruneGraphLayoutCaches(layoutKey);
+        }
+
+        return data.nodes.map(function (node, index) {
+          var id = graphNodeKey(node, index);
+          var point = cache[id] || initialGraphPoint(id, index, data.nodes.length, graphViewport());
+          return Object.assign({}, node, {
+            id: node.id || id,
+            x: point.x,
+            y: point.y,
+            fixed: Boolean(point.fixed),
+            draggable: true,
+            cursor: "move",
+          });
+        });
+      }
+
+      function eventPoint(event) {
+        if (!event || !Number.isFinite(event.offsetX) || !Number.isFinite(event.offsetY)) {
+          return null;
+        }
+        try {
+          var converted = chart.convertFromPixel({ seriesIndex: 0 }, [event.offsetX, event.offsetY]);
+          if (Array.isArray(converted) && Number.isFinite(converted[0]) && Number.isFinite(converted[1])) {
+            return { x: converted[0], y: converted[1] };
+          }
+        } catch (error) {
+          return { x: event.offsetX, y: event.offsetY };
+        }
+        return { x: event.offsetX, y: event.offsetY };
+      }
+
+      function rememberDraggedNode(params) {
+        if (graphLayout !== "force" || !params || params.dataType !== "node") {
+          return;
+        }
+        var cache = graphPositionCache[activeLayoutKey];
+        if (!cache) {
+          return;
+        }
+        var event = params.event && (params.event.event || params.event);
+        var point = eventPoint(event);
+        if (!validGraphPoint(point) && validGraphPoint(params.data)) {
+          point = { x: params.data.x, y: params.data.y };
+        }
+        if (!validGraphPoint(point)) {
+          return;
+        }
+        cache[graphNodeKey(params.data, params.dataIndex)] = { x: point.x, y: point.y, fixed: true };
+        graphLayoutSettled[activeLayoutKey] = true;
+      }
+
+      function rememberPointerPosition(event) {
+        var cache = graphPositionCache[activeLayoutKey];
+        if (graphLayout !== "force" || !draggingNode || !cache) {
+          return;
+        }
+        var point = eventPoint(event);
+        if (!validGraphPoint(point)) {
+          return;
+        }
+        cache[draggingNode.id] = { x: point.x, y: point.y, fixed: true };
+        graphLayoutSettled[activeLayoutKey] = true;
+      }
+
+      function renderGraph(data) {
+        if (!chart) {
+          showError("图表库加载失败，请刷新页面重试。");
+          return;
+        }
+
+        if (!data.nodes.length) {
+          chart.setOption(
+            {
+              title: {
+                text: "暂无图谱数据",
+                left: "center",
+                top: "middle",
+                textStyle: { color: getMutedColor(), fontSize: 16 },
+              },
+              series: [],
+            },
+            true
+          );
+          return;
+        }
+
+        var idToName = {};
+        data.nodes.forEach(function (n) {
+          idToName[n.id] = n.name;
+        });
+
+        var isCircular = graphLayout === "circular";
+        var renderNodes = isCircular ? data.nodes : prepareGraphNodesForRender(data);
+        var seriesConfig = {
+          type: "graph",
+          layout: isCircular ? "circular" : "none",
+          roam: true,
+          draggable: true,
+          color: getPalette(),
+          data: renderNodes,
+          links: data.links,
+          label: {
+            show: true,
+            position: "right",
+            fontSize: 11,
+            color: getTextColor(),
+          },
+          lineStyle: {
+            color: "source",
+            curveness: 0.22,
+            opacity: currentTheme === "dark" ? 0.72 : 0.62,
+          },
+          emphasis: {
+            focus: "adjacency",
+          },
+        };
+
+        if (isCircular) {
+          seriesConfig.circular = {
+            rotateLabel: true,
+          };
+        }
+
+        chart.setOption(
+          {
+            backgroundColor: "transparent",
+            color: getPalette(),
+            textStyle: { color: getTextColor() },
+            animation: isCircular,
+            tooltip: {
+              trigger: "item",
+              backgroundColor: getTooltipBackground(),
+              borderColor: getTooltipBorderColor(),
+              borderWidth: 1,
+              textStyle: { color: getTextColor() },
+              formatter: function (params) {
+                if (params.dataType === "node") {
+                  return (
+                    "<b>" +
+                    escapeHtml(params.name) +
+                    "</b><br/>消息数: " +
+                    (params.data.value || 0)
+                  );
+                }
+                if (params.dataType === "edge") {
+                  var src = idToName[params.data.source] || params.data.source;
+                  var tgt = idToName[params.data.target] || params.data.target;
+                  return (
+                    "<b>" +
+                    escapeHtml(src) +
+                    "</b> <-> <b>" +
+                    escapeHtml(tgt) +
+                    "</b><br/>关系: " +
+                    escapeHtml(params.data.relationTypeText || "互动") +
+                    "<br/>强度: " +
+                    Number(params.data.value || 0).toFixed(2) +
+                    "<br/>互动次数: " +
+                    (params.data.frequency || 0)
+                  );
+                }
+                return "";
+              },
+            },
+            series: [seriesConfig],
+          },
+          true
+        );
+
+        chart.off("dragend");
+        chart.on("dragend", function (params) {
+          rememberDraggedNode(params);
+        });
+
+        chart.off("mousedown");
+        chart.on("mousedown", function (params) {
+          draggingNode = params && params.dataType === "node"
+            ? { id: graphNodeKey(params.data, params.dataIndex) }
+            : null;
+        });
+
+        var zr = chart.getZr();
+        if (zr && chart.__selfLearningMouseupHandler) {
+          zr.off("mouseup", chart.__selfLearningMouseupHandler);
+        }
+        chart.__selfLearningMouseupHandler = function (event) {
+          rememberPointerPosition(event && event.event ? event.event : event);
+          draggingNode = null;
+        };
+        if (zr) {
+          zr.on("mouseup", chart.__selfLearningMouseupHandler);
+        }
+      }
+
+      async function loadSharedGraph() {
+        try {
+          var resp = await fetch(
+            "/api/public/social_graph/" + encodeURIComponent(token)
+          );
+          var data = await resp.json();
+
+          if (!resp.ok || !data.success) {
+            showError((data && data.error) || "分享链接无效或已过期。");
+            return;
+          }
+
+          var graph = data.graph || {};
+          var share = data.share || {};
+          rawMembers = graph.members || [];
+          rawRelations = graph.relations || [];
+          renderStats(graph, share);
+          updateMemberFilter(rawMembers);
+          renderGraph(getFilteredGraphData());
+        } catch (e) {
+          showError("加载失败：" + (e && e.message ? e.message : "网络错误"));
+        }
+      }
+
+      if (memberFilterEl) {
+        memberFilterEl.addEventListener("change", function () {
+          renderGraph(getFilteredGraphData());
+        });
+      }
+
+      if (layoutForceEl) {
+        layoutForceEl.addEventListener("click", function () {
+          setLayout("force");
+        });
+      }
+
+      if (layoutCircularEl) {
+        layoutCircularEl.addEventListener("click", function () {
+          setLayout("circular");
+        });
+      }
+
+      applyTheme(readTheme());
+      window.addEventListener("resize", function () {
+        if (chart) chart.resize();
+      });
+
+      loadSharedGraph();
+    })();
+  </script>
+</body>
+</html>

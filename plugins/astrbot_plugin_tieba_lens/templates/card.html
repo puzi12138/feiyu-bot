@@ -1,0 +1,128 @@
+
+{% autoescape true %}<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+{% if font_face_src %}@font-face{font-family:"{{ font_family }}";src:url("{{ font_face_src }}") format("{{ font_format|default('woff2') }}");font-weight:400;font-style:normal;font-display:block}{% endif %}
+{% if fallback_font_face_src %}@font-face{font-family:"LXGW WenKai Screen";src:url("{{ fallback_font_face_src }}") format("woff2");font-weight:400;font-style:normal;font-display:block}{% endif %}
+*{box-sizing:border-box}html,body{margin:0;width:{{ width }}px}
+body{--ink:{{ colors.ink }};--muted:{{ colors.muted }};--accent:{{ colors.accent }};--line:{{ colors.line }};--soft:{{ colors.soft }};--chip:{{ colors.chip }};--chip-ink:{{ colors.chip_ink }};--bg:{{ colors.bg }};
+--g:{{ (width * 0.038)|round(1) }}px;--body:{{ (width / 48 + 6)|round(1) }}px;
+font-family:{% if font_family %}"{{ font_family }}",{% endif %}"LXGW WenKai Screen","Noto Sans CJK SC","Microsoft YaHei","PingFang SC",sans-serif;
+color:var(--ink);background:var(--bg);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow-x:hidden}
+.theme-hero{display:grid;grid-template-columns:minmax(0,1fr) {{ (width * 0.205)|round(1) }}px;gap:16px;align-items:center;position:relative;isolation:isolate;overflow:hidden;padding:26px var(--g) 25px;border-bottom:1px solid var(--line);background:linear-gradient(120deg,#fff8,transparent 80%)}
+.hero-copy{position:relative;z-index:2;min-width:0}.hero-meta{display:flex;align-items:center;gap:12px;margin-bottom:14px;color:var(--muted);font-size:{{ (width / 80 + 6)|round(1) }}px;line-height:1.5}
+.forum-pill{display:inline-flex;align-items:center;max-width:100%;padding:3px 12px;border:1px solid color-mix(in srgb,var(--accent) 25%,transparent);border-radius:9px;background:color-mix(in srgb,var(--bg) 78%,#fff);color:var(--accent);font-weight:700;overflow-wrap:anywhere;box-shadow:inset 0 1px #fff8}
+.kind-label{flex:none}.hero-copy h1{font-size:{{ (width / 32 + 5)|round(1) }}px;line-height:1.42;letter-spacing:.1px;margin:0;font-weight:700;overflow-wrap:anywhere;text-wrap:balance}
+.hero-stats{display:flex;flex-wrap:wrap;gap:18px;font-size:17px;color:var(--muted);margin-top:14px}.hero-stats b{font-weight:700;color:var(--accent);margin-right:5px;font-variant-numeric:tabular-nums}
+.hero-art{position:relative;height:{{ (width * 0.185)|round(1) }}px;min-width:0;z-index:1;display:flex;align-items:center;justify-content:center}
+.hero-art::before{content:"";position:absolute;width:86%;aspect-ratio:1;border-radius:50%;background:radial-gradient(circle at 30% 22%,#ffffffd9,{{ colors.highlight }}99 56%,transparent 73%);filter:blur(4px)}
+.hero-art img{display:block;position:relative;width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 7px 5px #18363220)}
+.hero-art svg{position:relative;width:100%;height:100%;overflow:visible}.art-credit{display:block;text-align:right;margin-top:4px;font-size:12px;line-height:1.3;color:var(--muted)}
+.orbit{position:absolute;border:1px solid #ffffffb0;border-radius:50%;width:65px;height:65px;right:-2px;top:5px;box-shadow:inset 2px 2px 9px #fff9,0 0 16px #f3b2d440;background:radial-gradient(circle at 25% 25%,#fff9,transparent 30%),conic-gradient(from 25deg,#f9c1df44,#b5d9f744,#f2e2bc44,#efb2d744)}
+.orbit.small{width:26px;height:26px;left:4px;right:auto;top:auto;bottom:8px}.stage-bars{position:absolute;inset:auto 3px 4px;height:24px;display:flex;align-items:flex-end;gap:5px;opacity:.55}.stage-bars i{width:5px;border-radius:2px;background:#21a99e}
+.hero-aurora{position:absolute;inset:-45px -20px auto 48%;height:190px;transform:rotate(-19deg);background:linear-gradient(180deg,transparent,#51bcd324,#b6a0e22e,transparent);filter:blur(23px);z-index:-1}
+.midnight .theme-hero{background:radial-gradient(ellipse at 90% 0,#243757,transparent 76%),#111c2e}.midnight .hero-art::before{background:radial-gradient(circle,#abc5ff14,transparent 70%)}
+.midnight .forum-pill{background:#23334a;color:#c0d6fc;border-color:#6683a04d}.midnight .hero-copy h1{text-shadow:0 2px 20px #889fcc20}
+.paper{background:#fbf7ee}.paper .theme-hero{background:radial-gradient(ellipse at 88% 12%,#eadbb8a0,transparent 70%),linear-gradient(110deg,#fffaf2,#f4ecdc)}
+.paper .hero-art::after{content:"";position:absolute;width:118px;height:25px;bottom:8px;background:#fff4caa0;box-shadow:0 1px 1px #ae8d5822;transform:rotate(-8deg);z-index:-1}
+.mist{background:#f2f7f4}.mist .theme-hero{background:radial-gradient(ellipse at 85% 30%,#b8d4caa0,transparent 64%),linear-gradient(140deg,#edf6f1,#e0eee8)}
+.mist .hero-art::before{width:110%;height:90%;border-radius:0;background:radial-gradient(ellipse,#ffffffbb,transparent 72%);filter:blur(12px)}
+.miku{background:#f0f8f6}.miku .theme-hero{background:linear-gradient(116deg,#f8fffe 25%,#d6eee9 80%,#c3e5e0)}
+.miku .theme-hero::after{content:"";position:absolute;right:0;top:0;bottom:0;width:25%;background:radial-gradient(#188e8130 .8px,transparent 1px);background-size:9px 9px;z-index:-1;mask-image:linear-gradient(90deg,transparent,#000)}
+.miku .forum-pill{color:#0a716a;border-color:#83b9ae;background:#f8fffc}.miku .hero-art::before{box-shadow:inset 0 0 0 1px #f5fffcaa,0 8px 20px #5bafa622;background:linear-gradient(140deg,#e5fff9aa,#69c9b940)}
+.denia{background:#fbf4f5}.denia .theme-hero{background:radial-gradient(ellipse at 88% 12%,#e6cbec88,transparent 65%),linear-gradient(115deg,#fff8f6,#f5dfe8)}
+.denia .hero-art::before{background:conic-gradient(from 60deg,#f5d2e480,#d4e4ff70,#fff3d570,#f8cddd90);box-shadow:inset 0 0 0 1px #fff8,0 0 24px #fff9;filter:none}
+.bilibili{background:#fff6f9}.bilibili .theme-hero{background:radial-gradient(ellipse at 90% 20%,#c7eef455,transparent 65%),linear-gradient(110deg,#fff,#ffeaf2)}
+.bilibili .forum-pill{background:#fff8fb;border-color:#f4abc5;color:#b42d5c}.bilibili .hero-art::before{border-radius:23px;transform:rotate(8deg);background:linear-gradient(130deg,#fff9,#f8d9e8);box-shadow:0 6px 16px #bd54851a,inset 0 1px #fffc}
+main{padding:16px var(--g) 12px}.continued main{padding-top:20px}.primary-post{padding:0 0 14px}.post-meta{display:flex;align-items:center;gap:13px;min-height:54px;margin:0 0 10px}
+.avatar{display:block;flex:none;width:52px;height:52px;border-radius:50%;object-fit:cover;border:2px solid #ffffffb0;box-shadow:0 2px 5px #122e2420}.avatar-empty{display:flex;align-items:center;justify-content:center;background:var(--soft);color:var(--accent);font-size:23px;font-weight:700}
+.author-info{flex:1;min-width:0}.author-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px;line-height:1.45}.author-name{font-size:23px;font-weight:700;overflow-wrap:anywhere}.time{font-size:16px;color:var(--muted);line-height:1.6}
+.level,.op,.tag{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;font-size:13px;line-height:20px;padding:0 6px;font-weight:700;border-radius:5px;white-space:nowrap;border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);background:var(--chip);color:var(--chip-ink)}
+.op{color:var(--accent);background:transparent}.likes{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font:15px "Noto Sans CJK SC",sans-serif}.likes svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7}
+.post-content{padding-left:65px}.content{font-size:var(--body);line-height:1.68;white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 11px}.content:last-child{margin-bottom:0}.inline-link{color:var(--accent);text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:4px}
+.inline-emoji{height:1.25em;width:auto;max-width:1.6em;display:inline-block;vertical-align:-.25em}.post-image{display:block;max-width:100%;height:auto;object-fit:contain;margin:11px 0 14px;border-radius:10px;box-shadow:0 3px 12px #173b2420;border:1px solid color-mix(in srgb,var(--line) 70%,transparent)}
+.reply-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0 10px;margin-top:2px;border-top:2px solid var(--line)}.reply-bar strong{font-size:23px}.reply-bar b{font-weight:700;margin-left:8px;color:var(--accent)}.reply-bar>span{font-size:16px;color:var(--muted)}
+.reply-row{padding:12px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 65%,transparent)}.reply-row:last-child{border:0}.reply-row .author-name{font-size:21px}.reply-row .avatar{width:46px;height:46px}.reply-row .post-content{padding-left:59px}.reply-row .content{font-size:{{ (width / 48 + 4)|round(1) }}px}
+.comment-list{position:relative;background:color-mix(in srgb,var(--soft) 52%,var(--bg));border:1px solid color-mix(in srgb,var(--line) 70%,transparent);border-left:3px solid color-mix(in srgb,var(--accent) 65%,var(--line));border-radius:0 10px 10px 0;padding:10px 14px;margin-top:12px;box-shadow:inset 0 1px #ffffff55}
+.comment-line{font-size:{{ (width / 48 + 1)|round(1) }}px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 6px}.comment-line:last-child{margin-bottom:0}.comment-name{font-weight:700;color:var(--accent)}.comment-image{display:block;max-width:100%;height:auto;margin:8px 0;border-radius:7px}.nested-comments{border-left:1px solid var(--line);padding-left:12px;margin:6px 0}.comment-more,.comment-continuation,.orphan-note{font-size:16px;line-height:1.5;color:var(--muted);margin:5px 0}.orphan-note{margin-bottom:8px}
+.comment-entry{margin:0 0 12px}.comment-entry:last-child{margin-bottom:0}.comment-author{display:flex;align-items:center;flex-wrap:wrap;gap:6px;line-height:1.5;min-width:0;margin-bottom:3px}.comment-name{font-size:18px;overflow-wrap:anywhere;min-width:0}.comment-avatar{display:block;flex:none;width:26px;height:26px;object-fit:cover;border-radius:50%;border:1px solid #ffffff80}.comment-avatar-empty{display:flex;align-items:center;justify-content:center;background:var(--chip);color:var(--chip-ink);font-size:15px}.comment-time{font-size:13px;color:var(--muted)}.comment-author .level,.comment-author .op{font-size:11px;line-height:17px;padding:0 4px}.comment-author .likes{font-size:13px}.comment-body{padding-left:32px}.comment-author .likes svg{width:13px;height:13px}.comment-body>.nested-comments{margin-left:0}.comment-author .comment-name{white-space:pre-wrap}
+.bilibili .comment-list{border-left-color:#53a7bc;background:#f2f7fa}.bilibili .comment-name{color:#256c83}.miku .comment-list{background:#e5f2ef}.midnight .comment-list{background:#18253b;box-shadow:inset 0 1px #ffffff0a}
+.description{font-size:var(--body);line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;padding:13px 17px;background:var(--soft);border-radius:10px;margin:0 0 14px}.more-replies{padding:12px 0 3px;color:var(--muted);font-size:17px;line-height:1.6;overflow-wrap:anywhere}.placeholder{font-size:18px;color:var(--muted);background:var(--soft);border:1px dashed var(--line);padding:14px;border-radius:8px;line-height:1.5;overflow-wrap:anywhere;margin:10px 0}
+.thread-summary{padding:12px 0 16px;border-bottom:1px solid var(--line)}.thread-summary:last-child{border:0}.thread-summary-content{padding-left:65px}.thread-summary h2{font-size:26px;line-height:1.5;margin:0 0 7px;font-weight:700;overflow-wrap:anywhere;text-wrap:pretty}.thread-excerpt{font-size:22px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}.thread-images{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.thread-images img{max-width:31.8%;max-height:200px;object-fit:contain;border-radius:8px}.thread-stats{font-size:16px;color:var(--muted);margin-top:7px}.thread-stats strong{color:var(--accent);margin-right:4px}.tag{display:inline-block;vertical-align:3px;margin-right:6px}.tag.good{background:var(--soft)}
+.profile-meta{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.profile-meta .avatar{width:58px;height:58px}.profile-meta .author-name{font-size:32px}.profile-stats{display:flex;flex-wrap:wrap;gap:18px;margin-top:14px;font-size:17px;color:var(--muted)}.profile-stats strong{margin-right:5px;color:var(--accent);font-size:22px}.continued-header{padding:13px var(--g);font-size:17px;color:var(--muted);border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.source-notes{margin:4px var(--g) 12px;padding-top:10px;border-top:1px solid var(--line);font-size:15px;line-height:1.65;color:var(--muted);overflow-wrap:anywhere}.source-notes ul{padding-left:1.3em;margin:0}.source-notes li+li{margin-top:3px}
+@media(max-width:700px){.theme-hero{gap:8px;padding-top:22px;padding-bottom:21px}.hero-meta{gap:8px}.kind-label{font-size:13px}.hero-stats{font-size:14px;gap:12px}.author-name{font-size:21px}.time{font-size:14px}.post-content{padding-left:0}.reply-row .post-content{padding-left:0}.comment-line{font-size:19px}.thread-summary-content{padding-left:0}.thread-summary h2{font-size:23px}.thread-excerpt{font-size:20px}.art-credit{font-size:10px}}
+</style></head><body class="{{ theme }}{% if chunk_index > 1 %} continued{% endif %}">
+{% macro level(author) %}{% if author.level is number %}<span class="level" title="贴吧等级 {{ author.level }}">Lv.{{ author.level }}</span>{% endif %}{% endmacro %}
+{% macro likes(value) %}{% if value is number and value > 0 %}<span class="likes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.7 5.4a5.3 5.3 0 0 0-7.5 0L12 6.6l-1.2-1.2a5.3 5.3 0 0 0-7.5 7.5L12 21l8.7-8.1a5.3 5.3 0 0 0 0-7.5Z"/></svg>{{ value }}</span>{% endif %}{% endmacro %}
+{% macro inline_runs(block) %}{% for run in block.runs %}{% if run.type == 'emoji' and run.asset %}<img class="inline-emoji" src="{{ run.asset.src }}" alt="{{ run.alt }}">{% elif run.type == 'link' %}<span class="inline-link">{{ run.text }}</span>{% else %}{{ run.text }}{% endif %}{% endfor %}{% endmacro %}
+{% macro render_comment(section) %}{% set meta=section.meta %}<div class="comment-entry"><div class="comment-author">{% if meta.avatar %}<img class="comment-avatar" src="{{ meta.avatar.src }}" alt="{{ meta.author.name or '用户' }}的头像">{% else %}<span class="comment-avatar comment-avatar-empty">{{ (meta.author.name or '匿')[:1] }}</span>{% endif %}<span class="comment-name">{{ meta.author.name or '匿名用户' }}</span>{{ level(meta.author) }}{% if meta.is_op %}<span class="op">楼主</span>{% endif %}{{ likes(meta.likes) }}{% if meta.time %}<span class="comment-time">{{ meta.time }}</span>{% endif %}{% if meta.continuation %}<span class="comment-time">续</span>{% endif %}</div><div class="comment-body">{% for block in section.blocks %}{% if block.type == 'richtext' %}<div class="comment-line">{{ inline_runs(block) }}</div>{% elif block.type == 'image' %}{% if block.asset %}<img class="comment-image" src="{{ block.asset.src }}" width="{{ block.asset.width }}" height="{{ block.asset.height }}" alt="{{ block.alt }}">{% else %}<span class="comment-continuation">{{ block.placeholder }}</span>{% endif %}{% endif %}{% endfor %}{% if section.comments %}<div class="nested-comments">{% for child in section.comments %}{{ render_comment(child) }}{% endfor %}</div>{% endif %}{% for notice in section.more %}<div class="comment-more">{{ notice.text }}</div>{% endfor %}</div></div>{% endmacro %}
+{% macro render_post(section) %}{% set meta=section.meta %}{% set primary=not meta.depth and meta.floor == 1 %}{% if meta.depth %}<div class="reply-row"><div class="post-content">{% if meta.parent_floor is number %}<div class="orphan-note">楼中楼 · 续</div>{% endif %}<div class="comment-list">{{ render_comment(section) }}</div></div></div>{% else %}<article class="{% if primary %}primary-post{% else %}reply-row{% endif %}"><div class="post-meta">{% if meta.avatar %}<img class="avatar" src="{{ meta.avatar.src }}" alt="{{ meta.author.name or '用户' }}的头像">{% else %}<div class="avatar avatar-empty">{{ (meta.author.name or '匿')[:1] }}</div>{% endif %}<div class="author-info"><div class="author-line"><span class="author-name">{{ meta.author.name or '匿名用户' }}</span>{{ level(meta.author) }}{% if meta.is_op %}<span class="op">楼主</span>{% endif %}{{ likes(meta.likes) }}</div><span class="time">{{ meta.time }}{% if not primary and meta.floor is number %} · {% if meta.floor_inferred %}展示序号 {{ meta.floor }}{% else %}第 {{ meta.floor }} 楼{% endif %}{% endif %}{% if meta.continuation %} · 续{% endif %}</span></div></div><div class="post-content">{% for block in section.blocks %}{% if block.type == 'richtext' %}<p class="content richtext">{{ inline_runs(block) }}</p>{% elif block.type == 'image' %}{% if block.asset %}<img class="post-image" src="{{ block.asset.src }}" width="{{ block.asset.width }}" height="{{ block.asset.height }}" alt="{{ block.alt }}">{% else %}<div class="placeholder">{{ block.placeholder }}</div>{% endif %}{% endif %}{% endfor %}{% if section.comments or section.more %}<div class="comment-list">{% for child in section.comments %}{{ render_comment(child) }}{% endfor %}{% for notice in section.more %}<div class="comment-more">{{ notice.text }}</div>{% endfor %}</div>{% endif %}</div></article>{% endif %}{% endmacro %}
+
+
+{% if chunk_index == 1 %}
+<header class="theme-hero">
+  {% if theme == 'midnight' %}<div class="hero-aurora" aria-hidden="true"></div>{% endif %}
+  <div class="hero-copy">
+    <div class="hero-meta"><span class="forum-pill">{{ document.forum or '百度贴吧' }}{% if document.forum and not document.forum.endswith('吧') %}吧{% endif %}</span><span class="kind-label">{{ kind_name }}</span></div>
+    {% if document.kind == 'user' %}<div class="profile-meta">{% if avatar %}<img class="avatar" src="{{ avatar.src }}" alt="用户头像">{% endif %}<span class="author-name">{{ (document.author or {}).name or document.title }}</span>{{ level(document.author or {}) }}</div>
+    {% else %}<h1>{{ document.title or '贴吧内容' }}</h1>{% endif %}
+    {% if document.kind in ['forum','user'] %}<div class="profile-stats">{% for key,label in [('members','关注'),('threads','帖子'),('followers','粉丝')] %}{% if (document.stats or {}).get(key) is number %}<span><strong>{{ document.stats[key] }}</strong>{{ label }}</span>{% endif %}{% endfor %}</div>
+    {% else %}<div class="hero-stats">{% for key,label in [('replies','回复'),('likes','赞')] %}{% if (document.stats or {}).get(key) is number and document.stats[key] > 0 %}<span><b>{{ document.stats[key] }}</b>{{ label }}</span>{% endif %}{% endfor %}</div>{% endif %}
+  </div>
+  <div>
+  <div class="hero-art" aria-hidden="true">
+    {% if theme_art_src %}
+      {% if theme == 'denia' %}<span class="orbit"></span><span class="orbit small"></span>{% endif %}
+      {% if theme == 'miku' %}<span class="stage-bars">{% for h in [7,15,22,12,18,9,24,16,11,20,8,15,23,12] %}<i style="height:{{ h }}px"></i>{% endfor %}</span>{% endif %}
+      <img src="{{ theme_art_src }}" alt="">
+    {% elif theme == 'midnight' %}
+      <svg viewBox="0 0 200 180" fill="none"><path d="M130 20a53 53 0 1 0 40 82 48 48 0 0 1-40-82Z" fill="#dce6f7"/><path d="m20 119 35-35 32 28 39 31 36-17" stroke="#8bb5de88" stroke-width="1.2"/>{% for x,y in [(20,119),(55,84),(87,112),(126,143),(162,126),(171,36),(50,31)] %}<circle cx="{{ x }}" cy="{{ y }}" r="2.5" fill="#c6dbff"/>{% endfor %}<path d="m23 37 2-7 2 7 7 2-7 2-2 7-2-7-7-2Z" fill="#93bce5"/></svg>
+    {% elif theme == 'mist' %}
+      <svg viewBox="0 0 210 180" fill="none"><circle cx="158" cy="43" r="26" fill="#fafff7b0"/><path d="M-10 141 37 65 69 106 108 43 153 97 182 63 220 141Z" fill="#8db3a6" opacity=".55"/><path d="m-5 160 52-64 43 35 43-49 80 78Z" fill="#5a9384" opacity=".55"/><path d="M0 156q70-28 210 3v25H0" fill="#dcece5"/><path d="M53 71q21-27 44-8-20-8-25 13-11-11-19-5Z" fill="#eaf4ee"/><path d="M72 76q4 13-3 27m4-26 11 20" stroke="#426e62" stroke-width="1.7"/><path d="m73 57 4-17q12-8 16-1l-10 3-1 14" stroke="#eaf4ee" stroke-width="5" stroke-linecap="round"/></svg>
+    {% elif theme == 'bilibili' %}
+      <svg viewBox="0 0 210 180" fill="none"><rect x="42" y="37" width="131" height="104" rx="23" fill="#fff9" stroke="#e46698" stroke-width="5"/><path d="m74 17 22 19m45-19-20 19" stroke="#e46698" stroke-width="7" stroke-linecap="round"/><path d="m74 72 12 4m51-4-12 4" stroke="#456e84" stroke-width="9" stroke-linecap="round"/><path d="M88 107q18 16 36 0" stroke="#e46698" stroke-width="5" stroke-linecap="round"/><path d="m67 143-4 11m85-11 4 11" stroke="#e46698" stroke-width="6" stroke-linecap="round"/><rect x="1" y="89" width="45" height="23" rx="10" fill="#d9f0f5" stroke="#70b2c4"/><path d="m12 101 6 4 14-9" stroke="#508fa1" stroke-width="3"/><circle cx="184" cy="25" r="7" fill="#f1c0d5"/><path d="m191 98 3-9 3 9 9 3-9 3-3 9-3-9-9-3Z" fill="#8fcbd7"/></svg>
+    {% else %}
+      <svg viewBox="0 0 210 180" fill="none"><path d="m32 67 62-8 66 16-6 84-63-17-64 5Z" fill="#e9d8b8"/><path d="m34 61 61-7 65 15-6 84-61-17-63 6Z" fill="#fff9ea" stroke="#c5a67c" stroke-width="1.5"/><path d="m95 57-2 78M45 85l34-3m-36 17 34-3m-35 17 33-3m33-24 34 8m-35 6 34 8m-36 7 34 8" stroke="#c5a67c" stroke-width="1.5"/><path d="M117 124q3-64 58-100 5 54-58 100Z" fill="#b66448"/><path d="m109 146 47-99m-30 65 27-10m-22-3 25-9m-18-4 23-10" stroke="#f9e5c5" stroke-width="2"/><path d="m30 32 4-8 4 8 9 2-9 3-4 8-4-8-8-3Z" fill="#bc9868"/></svg>
+    {% endif %}
+  </div>
+  {% if theme == 'miku' and theme_art_src %}<small class="art-credit">插画：七宝カラ</small>{% endif %}
+  </div>
+</header>
+{% elif not options.single_image %}<header class="continued-header">{{ document.title or '贴吧内容' }} · 续</header>{% endif %}
+<main>
+{% set layout=namespace(reply_bar=chunk_index > 1) %}
+{% for section in sections %}
+  {% if section.kind == 'post' %}
+    {% if (section.meta.depth or section.meta.floor != 1) and not layout.reply_bar %}
+    <div class="reply-bar"><strong>回复{% if (document.stats or {}).replies is number %}<b>{{ document.stats.replies }}</b>{% endif %}</strong><span>{% if options.only_author %}只看楼主 · {% endif %}{% if options.sort == 'hot' %}按点赞数{% elif options.sort == 'latest' %}最新回复{% else %}原楼层顺序{% endif %}</span></div>
+    {% set layout.reply_bar=true %}
+    {% endif %}
+    {{ render_post(section) }}
+  {% elif section.kind == 'description' %}
+  <p class="description">{{ section.block.text }}</p>
+  {% elif section.kind == 'notice' %}
+  <div class="more-replies">{{ section.block.text }}</div>
+  {% elif section.kind == 'thread' %}
+  {% set block=section.block %}
+  <article class="thread-summary">
+    <div class="post-meta">
+      {% if block.avatar %}<img class="avatar" src="{{ block.avatar.src }}" alt="{{ block.author.name or '用户' }}的头像">{% else %}<div class="avatar avatar-empty">{{ (block.author.name or '匿')[:1] }}</div>{% endif %}
+      <div class="author-info">
+        <div class="author-line"><span class="author-name">{{ block.author.name or '匿名用户' }}</span>{{ level(block.author) }}{{ likes(block.thread.likes) }}</div>
+        <span class="time">{{ block.thread.time }}</span>
+      </div>
+    </div>
+    <div class="thread-summary-content">
+      <h2>{% if block.thread.is_top %}<span class="tag">置顶</span>{% endif %}{% if block.thread.is_good %}<span class="tag good">精品</span>{% endif %}{{ block.thread.title }}</h2>
+      <div class="thread-excerpt">{{ block.thread.excerpt }}</div>
+      {% if block.images %}<div class="thread-images">{% for asset in block.images %}{% if asset %}<img src="{{ asset.src }}" alt="帖子配图">{% else %}<div class="placeholder">图片暂不可用</div>{% endif %}{% endfor %}</div>{% endif %}
+      <div class="thread-stats">{% if block.thread.replies is number %}<span><strong>{{ block.thread.replies }}</strong>回复</span>{% endif %}</div>
+    </div>
+  </article>
+  {% endif %}
+{% endfor %}
+</main>
+{% if options.show_source|default(true) and warnings %}<aside class="source-notes" aria-label="本次读取说明"><ul>{% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}</ul></aside>{% endif %}
+
+</body></html>{% endautoescape %}
