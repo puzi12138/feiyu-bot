@@ -457,7 +457,7 @@ query 只保留用于B站搜索的关键词或UP主名字，不要包含“帮�
                     if watch_result.get("ok"):
                         lines.extend((
                             "",
-                            f"已按相关度选择第1条并实际看完：{selected_bvid}",
+                            f"已按相关度选择第1条并读取视频材料：{selected_bvid}",
                             str(watch_result.get("message") or ""),
                         ))
                     else:
@@ -1402,8 +1402,8 @@ query 只保留用于B站搜索的关键词或UP主名字，不要包含“帮�
                 )
                 if watch_result.get("ok"):
                     reply_content += (
-                        "\n\n【你已经实际看完该视频，必须基于以下观看结果回复，"
-                        "不要再说还没看或以后再看】\n"
+                        "\n\n【你已取得该视频的读取结果，必须基于下方材料的实际覆盖范围回复，"
+                        "保留抽样、字幕或旧记忆的限制，不要声称完整连续观看】\n"
                         + watch_result["message"]
                     )
                 else:

@@ -832,11 +832,14 @@ async def review_watched_video(steward, *, root=None):
                 used, total = native.get("storyboard_segments_used"), native.get("storyboard_segments_total")
                 if native.get("analysis_coverage") == "storyboard_sample_no_audio":
                     if type(used) is int and type(total) is int and 0 < used == total:
-                        visual = ("原生观看记录显示所有规划片段均使用无音频分镜画面抽样，"
+                        visual = ("原生观看记录显示本次可用片段均使用无音频分镜画面抽样，"
                                   "不等于连续看完全片。")
                     else:
                         visual = ("原生观看记录标注无音频分镜画面抽样；"
                                   "其余片段与整体音画覆盖未确认。")
+                elif native.get("analysis_coverage") == "storyboard_mixed_media":
+                    visual = ("原生观看记录含抽样分镜，部分片段使用媒体回退或未取得；"
+                              "整体音频覆盖待确认，不等于连续看完全片。")
                 else:
                     visual = "原生观看的画面与音频覆盖范围未确认。"
                 limitation = ("来源路线=" + source_route + "，覆盖状态=" + coverage["state"][:100]

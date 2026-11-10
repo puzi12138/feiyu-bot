@@ -3027,7 +3027,7 @@ class FeiyuSteward(
             video(string): 真实BV号、B站完整视频链接或b23.tv短链接。
 
         Returns:
-            已有音视频证据或任务启动状态；18帧画面与最多10分钟音轨抽样不代表完整观影。
+            已有音视频证据或任务启动状态；实际分镜抽样（旧缓存保留原帧范围）与最多10分钟音轨抽样不代表完整观影。
         """
         if (
             event.unified_msg_origin != OWNER_UMO

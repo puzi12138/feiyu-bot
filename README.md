@@ -46,6 +46,7 @@ THIRD_PARTY_NOTICES.md         组件来源、许可证及待确认项
 ## 阅读入口
 
 - [架构与依赖边界](docs/ARCHITECTURE.md)
+- [B站视频画面分析与证据边界](docs/BILI_VIDEO_PIPELINE.md)
 - [重新安装与配置](docs/SETUP.md)
 - [隐私排除与提交检查](docs/PRIVACY.md)
 - [组件许可和来源](THIRD_PARTY_NOTICES.md)

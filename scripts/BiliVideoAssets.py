@@ -4,9 +4,11 @@ import asyncio
 import importlib.util
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
+import wave
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,6 +16,87 @@ import httpx
 
 ROOT = Path("D:/QQBot")
 FFMPEG = ROOT / "runtime/ffmpeg/bin/ffmpeg.exe"
+FFPROBE = ROOT / "runtime/ffmpeg/bin/ffprobe.exe"
+
+
+def verified_source(path, media_type, duration):
+    """Reuse complete local media; preserve and reject an invalid old file."""
+    if not path.exists():
+        return False
+    limit = 180_000_000 if media_type == "video" else 60_000_000
+    if not path.is_file() or not 0 < path.stat().st_size <= limit:
+        raise ValueError("INVALID_CACHED_MEDIA")
+    receipt = subprocess.run(
+        [str(FFPROBE), "-v", "error", "-show_entries",
+         "format=duration:stream=codec_type,duration", "-of", "json", str(path)],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        timeout=20, creationflags=0x08000000,
+    )
+    if len(receipt.stdout) > 100_000:
+        raise ValueError("MEDIA_PROBE_OUTPUT_LIMIT")
+    data = json.loads(receipt.stdout)
+    if not any(row.get("codec_type") == media_type for row in data.get("streams", [])):
+        raise ValueError("CACHED_MEDIA_TYPE_MISMATCH")
+    seconds = float(data.get("format", {}).get("duration", 0))
+    if not math.isfinite(seconds) or abs(seconds - duration) > max(2, duration * 0.01):
+        raise ValueError("CACHED_MEDIA_DURATION_MISMATCH")
+    return True
+
+
+def cached_assets(folder, bvid):
+    """Read legacy receipts locally before any metadata or download request."""
+    manifest = folder / "assets.json"
+    if not manifest.exists():
+        return None
+    result = json.loads(manifest.read_text(encoding="utf-8"))
+    duration = result["duration"]
+    if (result.get("bvid") != bvid or isinstance(duration, bool)
+            or not isinstance(duration, (int, float)) or not math.isfinite(duration)
+            or not 1 <= duration <= 2700):
+        raise ValueError("INVALID_CACHED_ASSETS")
+    rows = result["audio_samples"]
+    declared = result["audio_seconds"]
+    if (not isinstance(rows, list) or not 1 <= len(rows) <= 3
+            or isinstance(declared, bool) or not isinstance(declared, (int, float))
+            or not math.isfinite(declared) or not 0 < declared <= 600.01):
+        raise ValueError("INVALID_CACHED_AUDIO")
+    total = 0
+    actual_total = 0
+    for row in rows:
+        start, seconds = row.get("start"), row.get("seconds")
+        if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) for value in (start, seconds))
+                or start < 0 or seconds <= 0 or start + seconds > duration + 0.01):
+            raise ValueError("INVALID_CACHED_AUDIO_WINDOW")
+        total += seconds
+        sample = Path(row["path"]).resolve(strict=True)
+        if sample.parent != folder.resolve() or not sample.is_file():
+            raise ValueError("INVALID_CACHED_SAMPLE_PATH")
+        # The ASR helper already returns old asr.json unchanged. Only material
+        # which could be newly transcribed needs local PCM duration verification.
+        if not (folder / "asr.json").is_file():
+            actual_total += verified_sample(sample, seconds)
+    if total > 600.01 or abs(total - declared) > 0.01 or actual_total > 600.01:
+        raise ValueError("INVALID_CACHED_AUDIO_BUDGET")
+    visual = folder / "video.m4s"
+    if not (folder / "vision.json").is_file():
+        if not verified_source(visual, "video", float(result["duration"])):
+            raise ValueError("CACHED_VISUAL_SOURCE_MISSING")
+    return {**result, "visual_source": str(visual)}
+
+
+def verified_sample(sample, seconds):
+    """Check actual local PCM duration before reusing a previous sample."""
+    if not sample.is_file() or not 0 < sample.stat().st_size <= 20_000_000:
+        raise ValueError("INVALID_CACHED_AUDIO_SAMPLE")
+    with wave.open(str(sample), "rb") as recording:
+        if (recording.getframerate() != 16000 or recording.getnchannels() != 1
+                or recording.getsampwidth() != 2):
+            raise ValueError("INVALID_CACHED_AUDIO_FORMAT")
+        actual = recording.getnframes() / recording.getframerate()
+    if abs(actual - seconds) > 0.01:
+        raise ValueError("CACHED_AUDIO_DURATION_MISMATCH")
+    return actual
 
 
 async def download(client, url, target, limit):
@@ -28,12 +111,14 @@ async def download(client, url, target, limit):
         headers={"Referer": "https://www.bilibili.com/", "User-Agent": "Mozilla/5.0"},
     ) as response:
         response.raise_for_status()
-        with target.open("wb") as output:
+        partial = target.with_suffix(target.suffix + ".part")
+        with partial.open("wb") as output:
             async for block in response.aiter_bytes(262144):
                 size += len(block)
                 if size > limit:
                     raise ValueError("MEDIA_SIZE_LIMIT")
                 output.write(block)
+        partial.replace(target)
     return size
 
 
@@ -54,6 +139,11 @@ async def main():
     bvid = sys.argv[1]
     if not re.fullmatch(r"BV[A-Za-z0-9]{10}", bvid):
         raise ValueError("INVALID_BVID")
+    folder = ROOT / "data/video-reading" / bvid
+    existing = cached_assets(folder, bvid)
+    if existing is not None:
+        print(json.dumps(existing, ensure_ascii=True))
+        return
     spec = importlib.util.spec_from_file_location(
         "bili_bridge", ROOT / "scripts/BiliScrollMcp.py"
     )
@@ -66,17 +156,8 @@ async def main():
     duration = float(info["duration"])
     if not 1 <= duration <= 2700:
         raise ValueError("VIDEO_OVER_45_MINUTES")
-    folder = ROOT / "data/video-reading" / bvid
     folder.mkdir(parents=True, exist_ok=True)
     manifest = folder / "assets.json"
-    if manifest.exists():
-        result = json.loads(manifest.read_text(encoding="utf-8"))
-        if all(
-            Path(row["path"]).is_file()
-            for row in result["frames"] + result["audio_samples"]
-        ):
-            print(json.dumps(result, ensure_ascii=True))
-            return
     streams = await item.get_download_url(page_index=0)
     dash = streams.get("dash", {})
     videos = [
@@ -94,39 +175,20 @@ async def main():
     async with httpx.AsyncClient(
         timeout=90, follow_redirects=False, trust_env=True
     ) as client:
-        sizes = await asyncio.gather(
-            download(
+        tasks = []
+        reused_bytes = 0
+        for path, media_type, stream, limit in (
+            (visual_path, "video", visual, 180_000_000),
+            (audio_path, "audio", audio, 60_000_000),
+        ):
+            if verified_source(path, media_type, duration):
+                reused_bytes += path.stat().st_size
+                continue
+            tasks.append(download(
                 client,
-                visual.get("baseUrl") or visual["base_url"],
-                visual_path,
-                180_000_000,
-            ),
-            download(
-                client,
-                audio.get("baseUrl") or audio["base_url"],
-                audio_path,
-                60_000_000,
-            ),
-        )
-    frames = []
-    for index in range(18):
-        at = min(duration - 0.1, max(0, 2 + (duration - 4) * index / 17))
-        path = folder / f"frame-{index:02d}.jpg"
-        await asyncio.to_thread(
-            ffmpeg,
-            "-ss",
-            f"{at:.3f}",
-            "-i",
-            visual_path,
-            "-frames:v",
-            1,
-            "-vf",
-            "scale=640:-2",
-            "-q:v",
-            3,
-            path,
-        )
-        frames.append({"at": round(at, 3), "path": str(path)})
+                stream.get("baseUrl") or stream["base_url"], path, limit,
+            ))
+        sizes = await asyncio.gather(*tasks)
     length = min(200, duration / 3)
     windows = (
         [
@@ -140,20 +202,23 @@ async def main():
     samples = []
     for index, (at, seconds) in enumerate(windows):
         path = folder / f"audio-{index:02d}.wav"
-        await asyncio.to_thread(
-            ffmpeg,
-            "-ss",
-            f"{at:.3f}",
-            "-i",
-            audio_path,
-            "-t",
-            f"{seconds:.3f}",
-            "-ar",
-            16000,
-            "-ac",
-            1,
-            path,
-        )
+        if path.exists():
+            verified_sample(path, seconds)
+        else:
+            await asyncio.to_thread(
+                ffmpeg,
+                "-ss",
+                f"{at:.3f}",
+                "-i",
+                audio_path,
+                "-t",
+                f"{seconds:.3f}",
+                "-ar",
+                16000,
+                "-ac",
+                1,
+                path,
+            )
         samples.append(
             {"start": round(at, 3), "seconds": round(seconds, 3), "path": str(path)}
         )
@@ -162,11 +227,12 @@ async def main():
         "bvid": bvid,
         "title": info["title"],
         "duration": duration,
-        "frames": frames,
-        "frame_scope": "18 uniformly sampled frames across the timeline; not continuous viewing.",
+        "frames": [],
+        "visual_source": str(visual_path),
+        "frame_scope": "Local video retained for dsh-video-storyboard; actual cell ranges are reported by the reader.",
         "audio_samples": samples,
         "audio_seconds": sum(row["seconds"] for row in samples),
-        "bytes": sum(sizes),
+        "bytes": reused_bytes + sum(sizes),
     }
     manifest.write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
