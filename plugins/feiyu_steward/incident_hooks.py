@@ -15,10 +15,11 @@ import inspect
 import json
 import math
 import sqlite3
+import ssl
 import sys
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 
 from .failure_diagnostics import record_failure
@@ -35,6 +36,9 @@ _QZONE_PUBLICATION = ContextVar("feiyu_incident_qzone_publication", default=Fals
 _NOTICE_POLL_TRACE = ContextVar("feiyu_incident_notice_poll_trace", default=None)
 _NOTICE_SERVICE_SCOPE = ContextVar("feiyu_incident_notice_service_scope", default=None)
 _AUTOMATIC_FEED_SCOPE = ContextVar("feiyu_incident_automatic_feed_scope", default=None)
+_HEYBOX_RETRY_INTAKE = ContextVar("feiyu_incident_retry_intake", default=None)
+_HEYBOX_RETRY_EVENT = ContextVar("feiyu_incident_retry_event", default=None)
+_HEYBOX_MODEL_EXCEPTION = ContextVar("feiyu_incident_model_exception", default=None)
 _ABSENT = object()
 _ACTIVE_INCIDENT_HOOKS = None
 _HEYBOX_API_MODULE = "data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.api_client"
@@ -213,6 +217,61 @@ def _category(error):
     return "unexpected_exception"
 
 
+def _retry_exception_kind(error):
+    """Accept only real transport classes; no error text/category grants a trial."""
+    chain, current = [], error
+    while isinstance(current, BaseException) and all(current is not item for item in chain) and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    if any(isinstance(item, ssl.SSLError) for item in chain):
+        return None
+    if any(isinstance(item, PermissionError) or _heybox_api_category(item) in {
+            "credential_invalid", "forbidden", "rate_limited", "send_unknown"} for item in chain):
+        return None
+    for module_name, names in (
+        ("openai", ("AuthenticationError", "PermissionDeniedError", "RateLimitError", "APIStatusError")),
+        ("httpx", ("HTTPStatusError",)),
+    ):
+        module = sys.modules.get(module_name)
+        if any(isinstance(cls, type) and isinstance(item, cls)
+               for item in chain for cls in (getattr(module, name, None) for name in names)):
+            return None
+    for kind, checks in (
+        ("timeout", (("openai", "APITimeoutError"), ("httpx", "TimeoutException"))),
+        ("connection", (("openai", "APIConnectionError"), ("httpx", "ConnectError"))),
+    ):
+        for module_name, name in checks:
+            cls = getattr(sys.modules.get(module_name), name, None)
+            if isinstance(cls, type) and isinstance(error, cls):
+                return kind
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, ConnectionResetError):
+        return "connection"
+    security = sys.modules.get("data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.security")
+    cls = getattr(security, "ImageHostResolutionError", None)
+    if isinstance(cls, type) and isinstance(error, cls) and len(chain) > 1:
+        return _retry_exception_kind(chain[1])
+    return None
+
+
+@asynccontextmanager
+async def fresh_heybox_processing(adapter, notification, event_id):
+    """Enter only from the adapter's native fresh-claim processing bridge."""
+    owner = _ACTIVE_INCIDENT_HOOKS
+    if owner is None or owner._active is not True:
+        yield False
+        return
+    async with owner._fresh_processing(adapter, notification, event_id) as allowed:
+        yield allowed
+
+
+def consume_heybox_retry_wake(adapter, feed):
+    """Consume a wake signal without granting source/model/send permission."""
+    owner = _ACTIVE_INCIDENT_HOOKS
+    return owner is not None and owner._consume_retry_wake(adapter, feed) is True
+
+
 def _request_not_authorized():
     """Build the adapter's fixed pause exception without importing it eagerly."""
     module = sys.modules.get(_HEYBOX_API_MODULE)
@@ -357,10 +416,15 @@ def automatic_feed_snapshot(feed, *, issuer=None):
         return None
     features = ("heybox_comment", "heybox_vision", "heybox_feed")
     try:
-        if owner is None or owner._blocked(*features):
+        if owner is None or (owner._blocked(*features) and not owner._retry_intake_allowed()):
             return None
-        snapshot = owner._resume_snapshot(features)
-        return snapshot if not owner._blocked(*features) and owner._resume_snapshot(features) == snapshot else None
+        intake = _HEYBOX_RETRY_INTAKE.get()
+        snapshot = (owner.host.incidents.retry_snapshot(intake["incident_id"], features)
+                    if owner._retry_intake_allowed() else owner._resume_snapshot(features))
+        allowed = not owner._blocked(*features) or owner._retry_intake_allowed()
+        current = (owner.host.incidents.retry_snapshot(intake["incident_id"], features)
+                   if owner._retry_intake_allowed() else owner._resume_snapshot(features))
+        return snapshot if allowed and current == snapshot else None
     except Exception:
         return None
 
@@ -398,6 +462,15 @@ class IncidentHooks:
         # Only fresh ordinary events claimed under this handle may use the
         # content-rejection exception. A restart never reclassifies old work.
         self._heybox_rejection_enabled_at = time.time()
+        self._retry_enabled_at = time.time()
+        self._retry_claims = {}
+        self._retry_events = {}
+        self._retry_reported = set()
+        self._retry_post_reports = {}
+        self._retry_wakes = {}
+        self._retry_wake_seen = set()
+        self._retry_epoch_attempted = False
+        self._retry_available = False
         _ACTIVE_INCIDENT_HOOKS = self
         self.refresh()
 
@@ -406,6 +479,17 @@ class IncidentHooks:
         # keep enforcing the incident policy instead of opening mid-send.
         try:
             policy = self.host.incidents
+            event_grant = _HEYBOX_RETRY_EVENT.get()
+            if (isinstance(event_grant, dict) and event_grant.get("trial") is not None
+                    and (not self._active or not self._retry_available or self._missing
+                         or _ACTIVE_INCIDENT_HOOKS is not self)):
+                return True
+            intake = _HEYBOX_RETRY_INTAKE.get()
+            if (isinstance(intake, dict) and intake.get("owner") is self
+                    and intake.get("task") is asyncio.current_task() and intake.get("claimed")
+                    and _HEYBOX_RETRY_EVENT.get() is None
+                    and any(feature.startswith("heybox_") for feature in features)):
+                return True
             if "heybox_comment" in features and getattr(self, "_heybox_rejection_pending", None):
                 return True
             return any(f in self._local_blocked or policy.blocked(f) is not False for f in features)
@@ -448,16 +532,281 @@ class IncidentHooks:
             return "incident_resume_barrier"
         return ""
 
-    async def _report(self, feature, category, stage):
+    async def _report(self, feature, category, stage, *, retry=None):
         if category is None:
             return
         try:
-            result = await self.host.incidents.report(feature, category, stage=stage)
+            kwargs = {"stage": stage}
+            if retry is not None:
+                kwargs["retry"] = retry
+            result = await self.host.incidents.report(feature, category, **kwargs)
             if not isinstance(result, dict) or result.get("blocked") is not True:
                 self._local_blocked.add(feature)
+            return result
         except Exception:
             # No exception body or dynamic identifier is ever logged here.
             self._local_blocked.add(feature)
+
+    def _retry_intake_allowed(self):
+        grant = _HEYBOX_RETRY_INTAKE.get()
+        try:
+            return bool(isinstance(grant, dict) and grant.get("owner") is self
+                        and self._retry_available
+                        and self.retry_local_preflight("heybox")
+                        and not self._heybox_rejection_pending
+                        and not self._local_blocked.intersection({"heybox_feed", "heybox_comment", "heybox_vision"})
+                        and grant.get("task") is asyncio.current_task() and not grant.get("claimed")
+                        and self.host.incidents.retry_intake_allowed(grant["incident_id"]) is True)
+        except Exception:
+            return False
+
+    def retry_local_preflight(self, scope):
+        """No trial may bypass this exact active owner's local safety latch."""
+        features = ({"heybox_feed", "heybox_comment", "heybox_vision"} if scope == "heybox"
+                    else {"bili_journal"} if scope == "bili_journal" else None)
+        required = ({"feed", "heybox_vision", "heybox_vision_group", "heybox_vision_provider",
+                     "heybox_model_failure", "heybox_delivery", "heybox_get_client",
+                     "heybox_retry_register", "heybox_retry_pipeline", "heybox_retry_model_class"}
+                    if scope == "heybox" else {"bili_journal"})
+        try:
+            return bool(features is not None and self._active and _ACTIVE_INCIDENT_HOOKS is self
+                        and getattr(self.host, "_incident_hooks", None) is self
+                        and self._retry_available and not self._missing
+                        and not self._local_blocked.intersection(features)
+                        and required.issubset(self._bindings)
+                        and all(getattr(self._bindings[key]["object"], self._bindings[key]["name"], None)
+                                is self._bindings[key]["wrapped"] for key in required))
+        except Exception:
+            return False
+
+    def _retry_scope(self, grant):
+        if grant is None or grant.get("trial") is None:
+            return nullcontext()
+        if not self.retry_local_preflight("heybox"):
+            raise IncidentFeaturePaused("retry_owner_retired")
+        trial = grant["trial"]
+        return self.host.incidents.retry_scope(trial["incident_id"], "event", token=trial["token"],
+                                               candidate_key=grant["post_id"], event_key=grant["event_key"])
+
+    async def _retry_terminal(self, runtime, event_id, route):
+        try:
+            row = await runtime.repository.db.fetchone(
+                "SELECT e.profile_id,e.post_id,e.event_type,e.status,e.claimed_at,e.raw_json,e.retry_count,e.next_retry_at,"
+                "EXISTS(SELECT 1 FROM outgoing_replies o WHERE o.incoming_event_id=e.id) AS outgoing,"
+                "r.revoked FROM incoming_events e LEFT JOIN feiyu_auto_reply_reservations r ON r.event_id=e.id WHERE e.id=?",
+                (event_id,))
+            if not row:
+                return False
+            raw = json.loads(row["raw_json"])
+            if (not isinstance(raw, dict) or any(str(key).startswith("_feiyu_recovery") for key in raw)
+                    or row["retry_count"] != 0 or row["next_retry_at"] not in (None, 0)):
+                return False
+            for table in ("feiyu_recovery_attempts", "feiyu_recovery_permission_revision1_attempts",
+                          "feiyu_recovery_owner_renewal1_attempts"):
+                exists = await runtime.repository.db.fetchone(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
+                if exists and await runtime.repository.db.fetchone(
+                        "SELECT 1 FROM " + table + " WHERE new_event_id=?", (event_id,)):
+                    return False
+            return bool(row["profile_id"] == route.profile_id and row["post_id"] == route.post_id
+                        and row["event_type"] in {"proactive_feed", "reply", "mention"}
+                        and row["status"] in {"ignored", "dead_letter"} and not row["outgoing"]
+                        and row["revoked"] == 1 and row["claimed_at"] >= self._retry_enabled_at)
+        except Exception:
+            return False
+
+    async def _retry_finish_grant(self, grant, outcome):
+        if grant is None or grant.get("trial") is None or grant.get("finished"):
+            return False
+        trial = grant["trial"]
+        grant["finished"] = True
+        return await self.host.incidents.retry_finish(trial["incident_id"], trial["token"],
+            grant["post_id"], grant["event_key"], outcome=outcome)
+
+    async def _retry_delivery_result(self, runtime, event_id, result):
+        grant = self._retry_claims.get((id(runtime), event_id))
+        if grant is None or grant.get("trial") is None or grant.get("finished"):
+            return
+        success = False
+        if (isinstance(result, dict) and result.get("status") == "sent"
+                and result.get("external_comment_id")
+                and not result.get("duplicate_send_suppressed") and not result.get("confirmed_existing_attempt")):
+            rows = await runtime.repository.db.fetchall(
+                "SELECT e.status AS event_status,o.status,o.external_comment_id,o.confirmed_at,o.attempted_at "
+                "FROM incoming_events e JOIN outgoing_replies o ON o.incoming_event_id=e.id "
+                "WHERE e.id=? AND e.profile_id=? AND e.post_id=?",
+                (event_id, grant["notification"].profile_id, grant["post_id"]))
+            success = bool(len(rows) == 1 and rows[0]["event_status"] == rows[0]["status"] == "sent"
+                           and rows[0]["external_comment_id"] == result["external_comment_id"]
+                           and type(rows[0]["confirmed_at"]) in (int, float)
+                           and rows[0]["confirmed_at"] >= rows[0]["attempted_at"] >= grant["notification"].observed_at)
+        await self._retry_finish_grant(grant, "success" if success else "unknown")
+
+    async def _retry_report_failure(self, runtime, event_id, route, feature, category, stage, kind):
+        if runtime is None:
+            await self._report(feature, category, stage)
+            return False
+        grant = self._retry_claims.get((id(runtime), event_id))
+        if grant is not None and grant.get("trial") is not None:
+            await self._retry_finish_grant(grant, "failed")
+            return True
+        # A real post is one failure even if two wrappers/events observe it.
+        # Reserve this process-local report slot before any terminal-state await;
+        # durable native post dedup and the trial's failed-key hash prevent replay.
+        post_key = (id(runtime.repository), str(route.post_id))
+        reports = getattr(self, "_retry_post_reports", None)
+        if reports is None:
+            reports = self._retry_post_reports = {}
+        prior = reports.get(post_key)
+        if prior is not None:
+            if kind not in {"connection", "timeout"}:
+                prior["hard"] = True
+                self._local_blocked.add("heybox_comment")
+            return False
+        post_report = {"hard": kind not in {"connection", "timeout"}}
+        reports[post_key] = post_report
+        identity = (id(runtime), event_id)
+        module = sys.modules.get(runtime.__class__.__module__)
+        block = getattr(module, "block_event", None)
+        if callable(block):
+            await block(runtime.repository, event_id, "new_content_processing_failed")
+        terminal = await self._retry_terminal(runtime, event_id, route)
+        if identity in self._retry_reported:
+            return False
+        self._retry_reported.add(identity)
+        retry = ({"scope": "heybox", "failed_key": str(route.post_id), "failure_kind": kind}
+                 if self._retry_available and terminal and not post_report["hard"]
+                 and kind in {"connection", "timeout"} else None)
+        result = await self._report(feature, category, stage, retry=retry)
+        incident_id = result.get("incident_id") if isinstance(result, dict) else None
+        if post_report["hard"]:
+            return False
+        if retry is not None and type(incident_id) is str:
+            ready = self.host.incidents.retry_ready(incident_id, str(route.post_id), verified_terminal=True) is True
+            if ready:
+                self._signal_retry_wake(runtime, route.profile_id, incident_id)
+            return ready
+        return False
+
+    def _signal_retry_wake(self, runtime, profile_id, incident_id):
+        """Signal only one live native loop after notice/terminal confirmation."""
+        try:
+            if (not self._active or not self._retry_available or self._missing
+                    or _ACTIVE_INCIDENT_HOOKS is not self or self.host._incident_hooks is not self
+                    or incident_id in self._retry_wake_seen
+                    or _current_heybox(self)[1] is not runtime):
+                return False
+            ready = self.host.incidents.retry_intake("heybox")
+            if not isinstance(ready, dict) or ready.get("incident_id") != incident_id:
+                return False
+            adapters = [adapter for adapter in runtime._adapters
+                        if str(adapter.config.get("profile_id", "default")) == str(profile_id)]
+            if len(adapters) != 1:
+                return False
+            adapter = adapters[0]
+            task = adapter._feed_task
+            if (not isinstance(task, asyncio.Task) or task.done() or task.cancelling()
+                    or adapter._stop.is_set() or adapter._refresh.is_set()
+                    or not isinstance(adapter._retry_wake, asyncio.Event)):
+                return False
+            self._retry_wakes[id(adapter)] = (adapter, task, runtime, incident_id)
+            self._retry_wake_seen.add(incident_id)
+            adapter._retry_wake.set()
+            return True
+        except Exception:
+            return False
+
+    def _consume_retry_wake(self, adapter, feed):
+        """Allow one scheduling bypass only on the exact current feed task."""
+        grant = self._retry_wakes.get(id(adapter))
+        try:
+            if (not isinstance(grant, tuple) or len(grant) != 4 or grant[0] is not adapter
+                    or grant[1] is not asyncio.current_task()):
+                return False
+            self._retry_wakes.pop(id(adapter), None)
+            if (adapter._feed_task is not grant[1]
+                    or grant[1].done() or grant[1].cancelling()
+                    or adapter._stop.is_set() or adapter._refresh.is_set()
+                    or not self.retry_local_preflight("heybox")
+                    or _current_heybox(self)[1] is not grant[2]
+                    or adapter not in grant[2]._adapters
+                    or feed.repository is not grant[2].repository
+                    or not _feed_chain_is_current(self, feed)):
+                return False
+            ready = self.host.incidents.retry_intake("heybox")
+            return isinstance(ready, dict) and ready.get("incident_id") == grant[3]
+        except Exception:
+            return False
+
+    @asynccontextmanager
+    async def _fresh_processing(self, adapter, notification, event_id):
+        grant, bound = None, None
+        try:
+            _, runtime, _ = _current_heybox(self)
+            module = sys.modules.get(runtime.__class__.__module__.rsplit(".", 1)[0] + ".feiyu_unseen_feed")
+            route = notification.route
+            base = (adapter in runtime._adapters and type(event_id) is int
+                    and notification.event_type.value == "proactive_feed")
+            if not base:
+                yield False
+                return
+            valid = await module.valid(runtime.repository, event_id, route)
+            if not valid:
+                # Preserve separately authorized non-trial recovery paths. They
+                # cannot acquire a new-content capability or reopen a pause.
+                recovery = sys.modules.get(runtime.__class__.__module__.rsplit(".", 1)[0] + ".feiyu_recovery")
+                allow = (not self._blocked("heybox_feed", "heybox_comment", "heybox_vision")
+                         and recovery.identity_allowed(runtime.repository, event_id, notification=notification) is True)
+                yield allow
+                return
+            grant = {"runtime": runtime, "adapter": adapter, "notification": notification,
+                     "event_id": event_id, "post_id": str(route.post_id),
+                     "event_key": str(route.profile_id) + ":" + str(event_id), "trial": None,
+                     "active": True, "finished": False}
+            intake = _HEYBOX_RETRY_INTAKE.get()
+            if isinstance(intake, dict) and intake.get("owner") is self:
+                config = runtime.config.snapshot()["proactive_feed"]
+                if (not self._retry_intake_allowed() or config.get("dry_run", True)
+                        or config.get("review_required", True)):
+                    yield False
+                    return
+                policy = self.host.incidents
+                token = policy.retry_reserve(intake["incident_id"], grant["post_id"], notification.observed_at)
+                if not token:
+                    yield False
+                    return
+                if not policy.retry_start(intake["incident_id"], token, grant["post_id"], grant["event_key"]):
+                    policy.retry_release(intake["incident_id"], token, grant["post_id"], definitely_not_started=True)
+                    yield False
+                    return
+                intake["claimed"] = True
+                grant["trial"] = {"incident_id": intake["incident_id"], "token": token}
+            self._retry_claims[(id(runtime), event_id)] = grant
+            bound = _HEYBOX_RETRY_EVENT.set(grant)
+            with self._retry_scope(grant):
+                try:
+                    yield True
+                except Exception as error:
+                    if grant.get("trial") is not None:
+                        await self._retry_finish_grant(grant, "failed")
+                        return
+                    kind = _retry_exception_kind(error)
+                    security = sys.modules.get(runtime.__class__.__module__.rsplit(".", 1)[0] + ".security")
+                    cls = getattr(security, "ImageHostResolutionError", None)
+                    if isinstance(cls, type) and isinstance(error, cls):
+                        handled = await self._retry_report_failure(runtime, event_id, route,
+                            "heybox_vision", "vision_failed", "notice_event", kind)
+                        if handled:
+                            return
+                    raise
+        finally:
+            if bound is not None:
+                _HEYBOX_RETRY_EVENT.reset(bound)
+            if grant is not None:
+                grant["active"] = False
+                if grant.get("trial") is not None and not grant.get("finished"):
+                    await self._retry_finish_grant(grant, "unknown")
+                self._retry_claims.pop((id(grant["runtime"]), event_id), None)
 
     def _bind(self, key, obj, name, factory, *, asynchronous=True):
         current = getattr(obj, name, None)
@@ -490,9 +839,16 @@ class IncidentHooks:
         async def wrapped(*args, **kwargs):
             feed = args[0] if args else kwargs.get("feed")
             scope_token = _AUTOMATIC_FEED_SCOPE.set((self, feed, wrapped))
+            intake_token = None
             try:
                 if self._blocked("heybox_feed", "heybox_comment", "heybox_vision"):
-                    return 0
+                    retry = self.host.incidents.retry_intake("heybox") if self._retry_available else None
+                    if not isinstance(retry, dict):
+                        return 0
+                    intake_token = _HEYBOX_RETRY_INTAKE.set({**retry, "owner": self,
+                        "task": asyncio.current_task(), "claimed": False})
+                    if not self._retry_intake_allowed():
+                        return 0
                 try:
                     return await original(*args, **kwargs)
                 except Exception as error:
@@ -506,6 +862,8 @@ class IncidentHooks:
                         await self._report("heybox_feed", _category(error), "feed_once")
                     raise
             finally:
+                if intake_token is not None:
+                    _HEYBOX_RETRY_INTAKE.reset(intake_token)
                 _AUTOMATIC_FEED_SCOPE.reset(scope_token)
         return wrapped
 
@@ -694,19 +1052,23 @@ class IncidentHooks:
         completed = getattr(event, "_completion", None)
         return bool(completed is not None and completed.is_set())
 
-    async def _finish_vision_incident(self, event):
+    async def _finish_vision_incident(self, event, failure_kind=None):
         """Atomically prevent a late send before recording this failure."""
         if self._vision_event_finished(event):
             return False
 
         async def record():
+            # Close the group synchronously before the terminal-state await.
+            self._local_blocked.add("heybox_vision")
             try:
-                # Enter report immediately: it closes and persists the feature
-                # before its first await can release another worker.
-                await self._report("heybox_vision", "vision_failed", "notice_event")
-            finally:
                 await event.runtime.fail_reply(event_id=event.event_id, route=event.route,
                                                error="incident_vision_failed", generated_ms=0)
+                await self._retry_report_failure(event.runtime, event.event_id, event.route,
+                    "heybox_vision", "vision_failed", "notice_event", failure_kind)
+            finally:
+                # Persistent F060 or the trial store now owns the closed gate.
+                if self.host.incidents.blocked("heybox_vision") is True:
+                    self._local_blocked.discard("heybox_vision")
 
         lock = getattr(event, "_send_lock", None)
         completed = getattr(event, "_completion", None)
@@ -727,8 +1089,10 @@ class IncidentHooks:
                 return False
             event.stop_event()
             event._final_send_done = True
-            completed.set()
-            await record()
+            try:
+                await record()
+            finally:
+                completed.set()
         return True
 
     async def _deny_vision_event(self, plugin, event):
@@ -744,6 +1108,11 @@ class IncidentHooks:
             if (group is not None and group["task"] is asyncio.current_task()
                     and purpose == "image" and _category(error) is not None):
                 group["failed"] = True
+                kind = _retry_exception_kind(error)
+                if kind is None:
+                    group["hard_failure"] = True
+                elif group.get("failure_kind") is None:
+                    group["failure_kind"] = kind
                 record_failure(getattr(self.host, "root", None), "heybox_vision",
                                "vision_provider", error=error)
             return original(profile_id, purpose, provider_id, error, details=details)
@@ -760,7 +1129,8 @@ class IncidentHooks:
                         and bool(settings.get("enable_image_understanding", True)))
             if not eligible:
                 return await original(event, *args, **kwargs)
-            group = {"task": asyncio.current_task(), "failed": False}
+            group = {"task": asyncio.current_task(), "failed": False,
+                     "hard_failure": False, "failure_kind": None}
             token = _HEYBOX_VISION_GROUP.set(group)
             try:
                 try:
@@ -769,12 +1139,12 @@ class IncidentHooks:
                     if _category(error) is None:
                         await self._deny_vision_event(plugin, event)
                     else:
-                        await self._finish_vision_incident(event)
+                        await self._finish_vision_incident(event, _retry_exception_kind(error))
                     raise
             finally:
                 _HEYBOX_VISION_GROUP.reset(token)
             if result is None and group["failed"]:
-                await self._finish_vision_incident(event)
+                await self._finish_vision_incident(event, None if group["hard_failure"] else group["failure_kind"])
                 # Stop the current event before another image group can run.
                 raise IncidentFeaturePaused("incident_vision_failed")
             return result
@@ -797,7 +1167,7 @@ class IncidentHooks:
                     if _category(error) is None:
                         await self._deny_vision_event(plugin, event)
                     else:
-                        await self._finish_vision_incident(event)
+                        await self._finish_vision_incident(event, _retry_exception_kind(error))
                 raise
             if eligible and result is False:
                 # No explicit failed provider was observed. Preserve a safe
@@ -807,8 +1177,18 @@ class IncidentHooks:
         return wrapped
 
     def _model_failure(self, original):
+        try:
+            runtime = self.host.plugin("astrbot_plugin_xiaoheihe_adapter").runtime
+            if runtime.fail_reply != original:
+                runtime = None
+        except Exception:
+            runtime = None
         @functools.wraps(original, updated=())
         async def wrapped(*, event_id, route, error, generated_ms):
+            expected = event_id is not None and isinstance(error, str) and (
+                error.startswith("heybox_main_model_failed:") or error == "AstrBot 原生管线返回空回复")
+            if expected:
+                self._local_blocked.add("heybox_comment")
             result = await original(event_id=event_id, route=route, error=error, generated_ms=generated_ms)
             # These are native fixed error codes; cancellation and arbitrary
             # exception messages cannot be mistaken for model failures.
@@ -821,8 +1201,67 @@ class IncidentHooks:
                     "heybox_main_model_failed:APITimeoutError": "model_timeout",
                     "heybox_main_model_failed:TimeoutException": "model_timeout",
                 }.get(error, "model_failed")
-                await self._report("heybox_comment", category, "notice_event")
+                kind = _retry_exception_kind(_HEYBOX_MODEL_EXCEPTION.get())
+                await self._retry_report_failure(runtime, event_id, route,
+                    "heybox_comment", category, "notice_event", kind)
+                if self.host.incidents.blocked("heybox_comment") is True:
+                    self._local_blocked.discard("heybox_comment")
             return result
+        return wrapped
+
+    def _main_exception(self, original):
+        @functools.wraps(original, updated=())
+        async def wrapped(checked, error):
+            token = _HEYBOX_MODEL_EXCEPTION.set(error)
+            try:
+                return await original(checked, error)
+            finally:
+                _HEYBOX_MODEL_EXCEPTION.reset(token)
+        return wrapped
+
+    def _retry_register(self, original):
+        @functools.wraps(original, updated=())
+        @contextmanager
+        def wrapped(adapter, event):
+            runtime = getattr(event, "runtime", None)
+            grant = self._retry_claims.get((id(runtime), getattr(event, "event_id", None)))
+            valid = (grant is not None and grant.get("active") and grant["adapter"] is adapter
+                     and getattr(event, "proactive", None) is True
+                     and getattr(event, "route", None) == grant["notification"].route
+                     and id(event) not in self._retry_events)
+            if valid:
+                grant["event"] = event
+                self._retry_events[id(event)] = grant
+            try:
+                with original(adapter, event) as allowed:
+                    yield allowed
+            finally:
+                if valid and self._retry_events.get(id(event)) is grant:
+                    self._retry_events.pop(id(event), None)
+        return wrapped
+
+    def _retry_pipeline(self, original):
+        @functools.wraps(original, updated=())
+        @asynccontextmanager
+        async def wrapped(event):
+            grant = self._retry_events.get(id(event))
+            if grant is None or grant.get("trial") is None:
+                async with original(event) as allowed:
+                    yield allowed
+                return
+            if (not self.retry_local_preflight("heybox")
+                    or not grant.get("active") or grant.get("event") is not event
+                    or grant.get("pipeline_task") is not None):
+                yield False
+                return
+            grant["pipeline_task"] = asyncio.current_task()
+            bound = _HEYBOX_RETRY_EVENT.set(grant)
+            try:
+                with self._retry_scope(grant):
+                    async with original(event) as allowed:
+                        yield allowed
+            finally:
+                _HEYBOX_RETRY_EVENT.reset(bound)
         return wrapped
 
     def _reply_expire(self, original):
@@ -1118,8 +1557,14 @@ class IncidentHooks:
             barrier_token = _HEYBOX_COMMENT_BARRIER.set(snapshot)
             try:
                 try:
-                    return await original(**kwargs)
+                    result = await original(**kwargs)
+                    await self._retry_delivery_result(runtime, event_id, result)
+                    return result
                 except Exception as error:
+                    grant = self._retry_claims.get((id(runtime), event_id))
+                    if grant is not None and grant.get("trial") is not None:
+                        await self._retry_finish_grant(grant, "unknown" if _heybox_api_category(error) == "send_unknown" else "failed")
+                        raise
                     if _heybox_api_category(error) == "platform_content_rejected":
                         # Close the final HTTP gate before the first metadata
                         # await. Each call releases only its own temporary gate;
@@ -1310,14 +1755,27 @@ class IncidentHooks:
         async def wrapped(steward, *args, **kwargs):
             if steward is not self.host:
                 return await original(steward, *args, **kwargs)
-            if self._blocked("bili_journal"):
+            intake = None
+            if (not self._active or _ACTIVE_INCIDENT_HOOKS is not self
+                    or "bili_journal" in self._local_blocked):
                 return {"processed": 0, "status": "incident_feature_paused"}
+            if self._blocked("bili_journal"):
+                intake = self.host.incidents.retry_intake("bili_journal") if self._retry_available else None
+                if (not self.retry_local_preflight("bili_journal") or not isinstance(intake, dict)
+                        or self.host.incidents.retry_intake_allowed(intake["incident_id"]) is not True):
+                    return {"processed": 0, "status": "incident_feature_paused"}
             try:
                 result = await original(steward, *args, **kwargs)
             except Exception as error:
                 await self._report("bili_journal", _category(error), "bili_journal_once")
                 raise
             if isinstance(result, dict):
+                retry = result.pop("_retry_failure", None)
+                terminal = result.pop("_retry_terminal", False)
+                if intake is not None and self.host.incidents.retry_intake("bili_journal") != intake:
+                    # The worker owns this trial's one terminal/notice action.
+                    # Do not manufacture another incident for its same failure.
+                    return result
                 status = result.get("status")
                 if status in {"failed", "worker_unavailable"}:
                     error_class = result.get("error_class")
@@ -1335,7 +1793,22 @@ class IncidentHooks:
                             "provider_unavailable": "model_failed",
                             "invalid_model_or_citation": "model_failed",
                         }.get(reason, category)
-                    await self._report("bili_journal", category, "bili_journal_once")
+                    valid_retry = (self._retry_available and terminal is True and category == "model_failed"
+                        and type(retry) is dict and set(retry) == {"scope", "failed_key", "failure_kind"}
+                        and retry.get("scope") == "bili_journal" and type(retry.get("failed_key")) is str
+                        and len(retry["failed_key"]) == 12 and retry["failed_key"].startswith("BV")
+                        and retry["failed_key"].isascii() and retry["failed_key"].isalnum()
+                        and type(retry.get("failure_kind")) is str
+                        and retry.get("failure_kind") in {"connection", "timeout"})
+                    report = await self._report("bili_journal", category, "bili_journal_once",
+                                                retry=retry if valid_retry else None)
+                    if valid_retry and isinstance(report, dict) and type(report.get("incident_id")) is str:
+                        if self.host.incidents.retry_ready(report["incident_id"], retry["failed_key"], verified_terminal=True) is True:
+                            try:
+                                from .bili_immediate_retry import request_immediate
+                                request_immediate(self.host, self, report["incident_id"])
+                            except Exception:
+                                self._local_blocked.add("bili_journal")
                 elif status == "journal_unknown":
                     await self._report("bili_journal", "delivery_unknown", "bili_journal_once")
             return result
@@ -1503,6 +1976,12 @@ class IncidentHooks:
         add("heybox_reply_timeout", runtime, "expire_reply", self._reply_expire)
         add("heybox_delivery", runtime, "deliver", self._comment_delivery)
         add("heybox_get_client", runtime, "get_client", self._get_heybox_client)
+        peer = sys.modules.get("data.plugins.feiyu_steward.heybox_peak")
+        add("heybox_retry_register", peer, "register_event", self._retry_register, asynchronous=False)
+        add("heybox_retry_pipeline", peer, "pipeline_scope", self._retry_pipeline, asynchronous=False)
+        plugin_module = sys.modules.get(getattr(type(heybox), "__module__", ""))
+        checked_type = getattr(plugin_module, "_CheckedProvider", None)
+        add("heybox_retry_model_class", checked_type, "_report_exception", self._main_exception)
         clients = getattr(runtime, "_clients", {})
         if isinstance(clients, dict):
             for client in clients.values():
@@ -1534,7 +2013,7 @@ class IncidentHooks:
                     "bili_journal", "bili_browse", "bili_poll", "bili_poll_finish", "bili_inner", "bili_action", "qzone_publication",
                     "heybox_vision", "heybox_vision_group", "heybox_vision_provider",
                     "heybox_model_failure", "heybox_reply_timeout", "heybox_delivery",
-                    "heybox_get_client"}
+                     "heybox_get_client", "heybox_retry_register", "heybox_retry_pipeline", "heybox_retry_model_class"}
         missing.extend(sorted(required - set(desired)))
         if (not callable(getattr(heybox, "_automatic_binding", None))
                 or not callable(getattr(heybox, "_deny_automatic_event", None))):
@@ -1542,6 +2021,12 @@ class IncidentHooks:
         if not services:
             missing.append("notice_service")
         self._missing = sorted(set(missing))
+        if not self._missing and not self._retry_epoch_attempted:
+            self._retry_epoch_attempted = True
+            try:
+                self._retry_available = self.host.incidents.retry_activate_runtime() is True
+            except Exception:
+                self._retry_available = False
         return self.status()
 
     def _native_feed_status(self):
@@ -1596,6 +2081,7 @@ class IncidentHooks:
         return {"installed": self._active, "ready": self._active and not self._missing and not stale,
                 "bindings": len(self._bindings) - len(stale), "missing_targets": list(self._missing),
                 "stale_targets": stale, "local_fail_closed": sorted(self._local_blocked),
+                "new_content_retry_ready": self._retry_available,
                 "native_feed_identity": self._native_feed_status()}
 
     def restore(self):
@@ -1606,6 +2092,11 @@ class IncidentHooks:
                 self._restore_binding(binding)
             self._bindings.clear()
             self._notice_claims.clear()
+            self._retry_available = False
+            self._retry_events.clear()
+            self._retry_claims.clear()
+            self._retry_wakes.clear()
+            self._retry_wake_seen.clear()
         if _ACTIVE_INCIDENT_HOOKS is self:
             _ACTIVE_INCIDENT_HOOKS = None
         return self.status()

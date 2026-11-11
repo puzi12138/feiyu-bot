@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .failure_diagnostics import record_failure
+from .new_content_retry import RetryStore, RetryUnavailable
 
 
 FEATURES = {
@@ -85,6 +86,25 @@ def _notice(row):
     )
 
 
+def _retry_notice(row):
+    """Fixed first notice for a narrowly eligible new-content trial."""
+    return (
+        f"主人，{FEATURES[row['feature']]}遇到问题：{CATEGORIES[row['category']]}。\n"
+        "我会先跳过这条，立即尝试另一条未处理过的新内容；"
+        "如果没有合适内容、再次失败或结果无法确认，就暂停这项功能。旧任务不会自动重发。\n"
+        f"功能：{row['feature']}\n故障编号：{row['id']}"
+    )
+
+
+def _retry_failure_notice(row):
+    return (
+        f"主人，{FEATURES[row['feature']]}的新内容尝试未能完成。\n"
+        "我已暂停这项自动功能，旧任务不会自动重发。\n"
+        f"功能：{row['feature']}\n故障编号：{row['incident_id']}\n"
+        "处理好后可用 /恢复功能 功能编号 故障编号 解除暂停。"
+    )
+
+
 def _stamp(value):
     return (not isinstance(value, bool) and isinstance(value, (int, float))
             and math.isfinite(value) and value >= 0)
@@ -110,6 +130,9 @@ class IncidentPolicy:
         # explicit rejection path. No import/init or replay on plugin startup.
         self._heybox_rejection_notices = None
         self._heybox_rejection_notice_binding = None
+        # An absent store means the optional trial is not installed. Partial or
+        # corrupt installed state never creates a permission to do more work.
+        self._retry_store = RetryStore(self.path.with_name("incident-new-content-trials.json"), now=now)
 
     @contextmanager
     def _file_lock(self, lock_path):
@@ -387,6 +410,11 @@ class IncidentPolicy:
                 return None
             rows = [row for row in value["incidents"] if row["feature"] in features]
             boundary = max((row["resolved_at"] for row in rows if row["state"] == "resolved"), default=0.0)
+            # A scoped trial never admits an old queued source. Its original
+            # paused incident remains in the generation until terminal success.
+            for row in rows:
+                if row["state"] == "paused" and self._retry_store.allows_event(row["id"]):
+                    boundary = max(boundary, row["created_at"])
             generation = tuple((row["id"], row["state"], row["resolved_at"]) for row in rows)
             return boundary, generation
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -404,9 +432,22 @@ class IncidentPolicy:
             if len(value["incidents"]) >= MAX_INCIDENTS:
                 self._store_error = "store_full"
                 return True
-            return (any(row["feature"] == feature and row["state"] != "resolved"
-                        for row in value["incidents"])
-                    or self._marker_path(feature).exists() or self._marker_path(feature).is_symlink())
+            active = [row for row in value["incidents"]
+                      if row["feature"] == feature and row["state"] != "resolved"]
+            if active:
+                return not (len(active) == 1 and active[0]["state"] == "paused"
+                            and self._retry_store.allows_event(active[0]["id"])
+                            and self._retry_current(active[0]["id"]) is not None)
+            # If the process stopped after accepting a trial but before its
+            # journal settled, a resolved incident is not enough to reopen it.
+            if (feature in {"heybox_vision", "heybox_comment", "bili_journal"}
+                    and self._retry_store.installed() and self._retry_store.unsettled_feature(feature)):
+                return True
+            return self._marker_path(feature).exists() or self._marker_path(feature).is_symlink()
+        except RetryUnavailable:
+            # Trial corruption fails closed for this query without poisoning
+            # the separate incident ledger or unrelated features.
+            return True
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             self._store_error = "store_unavailable"
             return True
@@ -443,6 +484,219 @@ class IncidentPolicy:
             return {"ok": False, "store_error": self._store_error, "active": {},
                     "protected_features_blocked": True}
 
+    def _retry_current(self, incident_id):
+        """Return the single matching paused, confirmed incident, or None."""
+        if self._store_error or type(incident_id) is not str or not _ID.fullmatch(incident_id):
+            return None
+        try:
+            if not self._retry_store.owns_generation():
+                return None
+            trial = self._retry_store.state(incident_id)
+            if trial is None or trial["feature"] in self._closing or self._marker(trial["feature"]):
+                return None
+            rows = self._read()["incidents"]
+            row = next((item for item in rows if item["id"] == incident_id), None)
+            if (not row or row["feature"] != trial["feature"] or row["state"] != "paused"
+                    or row["notification"] != "sent" or row["receipt_kind"] != "native"
+                    or not row["message_id"]):
+                return None
+            group = ({"heybox_vision", "heybox_comment", "heybox_feed"}
+                     if trial["scope"] == "heybox" else {"bili_journal"})
+            if any(item["feature"] in group and item["state"] != "resolved"
+                   and item["id"] != incident_id for item in rows):
+                return None
+            return trial
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, RetryUnavailable):
+            return None
+
+    def retry_activate_runtime(self):
+        """Called only by the newly installed, current hook owner once."""
+        try:
+            return self._retry_store.installed() and self._retry_store.activate_runtime()
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+
+    def retry_ready(self, incident_id, failed_key, *, verified_terminal=False):
+        """Arm only after the caller proves the old source terminal and unsent."""
+        try:
+            return (verified_terminal is True and self._retry_current(incident_id) is not None
+                    and self._retry_store.ready(incident_id, failed_key))
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+
+    def retry_intake(self, scope):
+        """A ready slot permits explicit source enumeration, never model/send."""
+        try:
+            candidate = self._retry_store.intake(scope)
+            return candidate if candidate and self._retry_current(candidate["incident_id"]) else None
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return None
+
+    def retry_intake_allowed(self, incident_id):
+        trial = self._retry_current(incident_id)
+        if trial is None:
+            return False
+        slot = self.retry_intake(trial["scope"])
+        return bool(slot and slot["incident_id"] == incident_id)
+
+    def retry_snapshot(self, incident_id, features):
+        """Return the same generation/boundary as the eventual event scope.
+
+        This only supports explicit source enumeration/selection. It grants no
+        model or send permission and never changes ``blocked()``.
+        """
+        trial = self._retry_current(incident_id)
+        if (trial is None or trial["generation"] != self._retry_store.generation
+                or trial["phase"] not in {"ready", "reserved", "started"}
+                or not isinstance(features, (tuple, list)) or not features
+                or trial["feature"] not in features
+                or any(not isinstance(feature, str) or feature not in FEATURES for feature in features)):
+            return None
+        try:
+            value = self._read()
+            if len(value["incidents"]) >= MAX_INCIDENTS:
+                return None
+            rows = [row for row in value["incidents"] if row["feature"] in features]
+            original = next((row for row in rows if row["id"] == incident_id), None)
+            if original is None or original["state"] != "paused":
+                return None
+            boundary = max([original["created_at"]] +
+                [row["resolved_at"] for row in rows if row["state"] == "resolved"])
+            return boundary, tuple((row["id"], row["state"], row["resolved_at"]) for row in rows)
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return None
+
+    def retry_reserve(self, incident_id, candidate_key, observed_at):
+        """Platform validates source provenance and historical dedup first."""
+        try:
+            if not self.retry_intake_allowed(incident_id):
+                return None
+            return self._retry_store.reserve(incident_id, candidate_key, observed_at)
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return None
+
+    def retry_release(self, incident_id, token, candidate_key, *, definitely_not_started=False):
+        try:
+            return (self._retry_current(incident_id) is not None and self._retry_store.release(
+                incident_id, token, candidate_key, definitely_not_started=definitely_not_started))
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+
+    def retry_start(self, incident_id, token, candidate_key, event_key):
+        try:
+            return (self._retry_current(incident_id) is not None
+                    and self._retry_store.start(incident_id, token, candidate_key, event_key))
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+
+    def retry_check(self, incident_id, token, candidate_key, event_key):
+        try:
+            return (self._retry_current(incident_id) is not None
+                    and self._retry_store.check(incident_id, token, candidate_key, event_key))
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+
+    @contextmanager
+    def retry_scope(self, incident_id, mode, *, token=None, candidate_key=None, event_key=None):
+        if mode == "intake":
+            if not self.retry_intake_allowed(incident_id):
+                raise RetryUnavailable("intake_unavailable")
+            # Intake grants no change to blocked(); explicit source enumeration
+            # code must consult retry_intake_allowed, and cannot send/model.
+            yield
+            return
+        if mode != "event" or not self.retry_check(incident_id, token, candidate_key, event_key):
+            raise RetryUnavailable("event_unavailable")
+        with self._retry_store.event_scope(incident_id, token, candidate_key, event_key):
+            yield
+
+    def _resolve_accepted_retry(self, incident_id):
+        """Resolve only an already accepted durable trial, with F060 locks."""
+        if self._retry_current(incident_id) is None:
+            return False
+        try:
+            with self._locked():
+                value = self._read()
+                row = next((item for item in value["incidents"] if item["id"] == incident_id), None)
+                trial = self._retry_store.state(incident_id)
+                if (not row or row["state"] != "paused" or row["notification"] != "sent"
+                        or not trial or trial["phase"] != "accepted"
+                        or trial["generation"] != self._retry_store.generation or self._marker(row["feature"])):
+                    return False
+                with self._flight_locked(incident_id):
+                    stamp = self.now()
+                    if not _stamp(stamp) or stamp <= 0:
+                        return False
+                    row.update(state="resolved", resolved_at=stamp)
+                    self._write(value)
+            # An accepted-but-not-settled row keeps blocked() closed if this
+            # final persistence fails or the process stops between the writes.
+            return self._retry_store.settle(incident_id)
+        except (IncidentStoreBusy, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, RetryUnavailable):
+            return False
+
+    async def retry_finish(self, incident_id, token, candidate_key, event_key, *, outcome):
+        """Conclude exactly this item; uncertain second notices never resend."""
+        try:
+            if self._retry_current(incident_id) is None:
+                return False
+            row = self._retry_store.finish(incident_id, token, candidate_key, event_key, outcome)
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+        if row is None:
+            return False
+        if outcome == "success":
+            return self._resolve_accepted_retry(incident_id)
+        return await self._notify_retry_block(row)
+
+    async def retry_abort_ready(self, incident_id, *, other_fault_notified=False):
+        """Stop discovery; a separately notified fault suppresses duplicate notice."""
+        try:
+            if type(other_fault_notified) is not bool or self._retry_current(incident_id) is None:
+                return False
+            # Suppression is valid only if an independent Bili browsing fault
+            # already owns the notice/pause, including an unknown receipt.
+            if other_fault_notified:
+                active = self.status("bili_browse").get("active", {}).get("bili_browse", {})
+                if (active.get("state") not in {"closing", "paused"}
+                        or active.get("notification") not in {"pending", "sent", "unknown"}):
+                    return False
+            row = self._retry_store.abort_ready(incident_id, notify=not other_fault_notified)
+        except (OSError, ValueError, TypeError, RetryUnavailable):
+            return False
+        if row is None:
+            return False
+        if other_fault_notified:
+            return True
+        return await self._notify_retry_block(row)
+
+    async def _notify_retry_block(self, row):
+        """Deliver at most one independently persisted terminal trial notice."""
+        notice_id = row["notice_id"]
+        text, task, confirmed_id = _retry_failure_notice(row), asyncio.current_task(), ""
+        try:
+            self._inflight[notice_id] = (task, notice_id, text)
+            from .peak_runtime import same_task_deadline
+            async with same_task_deadline(40):
+                result = await self.send_notice(notice_id, text)
+            identifier = result.get("message_id") if isinstance(result, dict) else None
+            if (isinstance(result, dict) and result.get("confirmed") is True
+                    and result.get("transport") == "native"
+                    and isinstance(identifier, (str, int)) and not isinstance(identifier, bool)
+                    and _MESSAGE_ID.fullmatch(str(identifier))):
+                confirmed_id = str(identifier)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        finally:
+            self._inflight.pop(notice_id, None)
+            try:
+                self._retry_store.finish_secondary_notice(notice_id, confirmed_id)
+            except (OSError, ValueError, TypeError, RetryUnavailable):
+                pass
+        return False
+
     def notice_authorized(self, incident_id, text, task):
         """Authorize only report()'s live, same-task, exact fixed notice."""
         if isinstance(incident_id, str) and incident_id.startswith("heybox-reject:"):
@@ -463,8 +717,19 @@ class IncidentPolicy:
         try:
             value = self._read()
             row = next((row for row in value["incidents"] if row["id"] == incident_id), None)
-            return bool(row and row["state"] == "closing" and row["notification"] == "pending"
-                        and text == _notice(row))
+            if row and row["state"] == "closing" and row["notification"] == "pending":
+                if text == _notice(row):
+                    return True
+                return bool(text == _retry_notice(row) and self._retry_store.planned_notice(incident_id))
+            # A second notice has a fresh durable ID; it never reuses the
+            # original incident's native delivery receipt or repeats pending.
+            trial = self._retry_store.secondary_notice(incident_id)
+            original = next((item for item in value["incidents"]
+                             if trial and item["id"] == trial["incident_id"]), None)
+            return bool(trial and trial["phase"] == "blocked" and original
+                        and original["state"] == "paused" and text == _retry_failure_notice(trial))
+        except RetryUnavailable:
+            return False
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             self._store_error = "store_unavailable"
             return False
@@ -530,7 +795,7 @@ class IncidentPolicy:
             # No exception text or external content crosses this boundary.
             return {"ok": False, "isolated": False, "reason": "rejection_notice_unavailable", "notification": "unknown"}
 
-    async def report(self, feature, category, *, stage="", event_id="", notify=True, _marker_seen=None):
+    async def report(self, feature, category, *, stage="", event_id="", notify=True, retry=None, _marker_seen=None):
         """Close this feature to new work, attempt one notice, then pause it.
 
         A prior active incident (including unknown delivery) is never resent.
@@ -552,6 +817,7 @@ class IncidentPolicy:
             return {"ok": False, "reason": self._store_error, "blocked": True}
         flight = None
         flight_acquired = False
+        retry_notice = False
         marker_seen = _marker_seen
         for attempt in range(_LOCK_ATTEMPTS):
             try:
@@ -651,6 +917,13 @@ class IncidentPolicy:
                     flight_acquired = True
                     value["incidents"].append(row)
                     self._write(value)
+                    if notify is True and retry is not None:
+                        try:
+                            # The incident is already durably closing. A
+                            # missing/bad trial store simply keeps F060.
+                            retry_notice = self._retry_store.prepare(row, retry) is True
+                        except (OSError, ValueError, TypeError, RetryUnavailable):
+                            retry_notice = False
                     if marker:
                         try:
                             self._clear_marker(feature, marker["id"])
@@ -697,7 +970,7 @@ class IncidentPolicy:
         task = asyncio.current_task()
         try:
             if notify is True:
-                text = _notice(row)
+                text = _retry_notice(row) if retry_notice else _notice(row)
                 self._inflight[row["id"]] = (task, row["id"], text)
                 # Keep the owner-notice grant on this task on Python 3.10/3.12.
                 from .peak_runtime import same_task_deadline
@@ -743,6 +1016,12 @@ class IncidentPolicy:
             finally:
                 if flight_acquired:
                     flight.__exit__(None, None, None)
+            if retry_notice:
+                try:
+                    # A missing/ambiguous notification never opens a trial.
+                    self._retry_store.first_notice(row["id"], persisted and notice_state == "sent")
+                except (OSError, ValueError, TypeError, RetryUnavailable):
+                    pass
         error = self._store_error or ("store_busy" if feature in self._busy else "")
         return {"ok": not bool(error), "reason": error or "paused",
                 "blocked": True, "incident_id": row["id"],
@@ -819,6 +1098,14 @@ class IncidentPolicy:
                         stamp = self.now()
                         if not _stamp(stamp) or stamp <= 0:
                             raise ValueError("invalid_clock")
+                        try:
+                            if self._retry_store.installed():
+                                trial = self._retry_store.state(incident_id)
+                                if (trial and trial["phase"] != "settled"
+                                        and not self._retry_store.owner_resolved(incident_id)):
+                                    return {"ok": False, "reason": "retry_generation_changed"}
+                        except RetryUnavailable:
+                            return {"ok": False, "reason": "retry_store_unavailable"}
                         row.update(state="resolved", resolved_at=stamp)
                         self._write(value)
                 except IncidentStoreBusy:

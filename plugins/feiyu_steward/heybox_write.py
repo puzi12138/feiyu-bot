@@ -1,16 +1,52 @@
 """Adapt the installed plugin to the current web comment-create contract.
 
 Protocol reference: k1m0206/better-XiaoHeiHe src/shared/workshop-signing.js
-and src/content/api-signing.js. Python implementation is independent.
+and the current official website bundle. Python implementation is independent.
 """
 
 import asyncio
-import hashlib
-import hmac
+import base64
+import json
+import secrets
 import importlib
 import re
 
 import httpx
+
+
+
+# Public protocol key from the current anonymous official website bundle.
+# It identifies the web contract and is not an account credential.
+_RND16_KEY = base64.b64decode("HFFSTsqmvG3uGxPNXDQW+1VARfqgG4nT6LS1PX7F8NQ=", validate=True)
+_RND16_AAD = b"heybox-rnd:v16"
+
+
+def generate_rnd16(timestamp, nonce, pathname, *, iv=None):
+    """Independently encode the current web signature, without the ``16:`` prefix."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if type(timestamp) not in (int, str):
+        raise ValueError("rnd16_time_invalid")
+    stamp = str(timestamp)
+    if not re.fullmatch(r"0|[1-9][0-9]*", stamp) or int(stamp) > 9007199254740991:
+        raise ValueError("rnd16_time_invalid")
+    if not isinstance(nonce, str) or not re.fullmatch(r"[0-9A-F]{32}", nonce):
+        raise ValueError("rnd16_nonce_invalid")
+    if (not isinstance(pathname, str) or not pathname.startswith("/")
+            or re.search(r"[\s?#\\]|[^\x21-\x7e]", pathname)):
+        raise ValueError("rnd16_path_invalid")
+    normalized_path = pathname if pathname.endswith("/") else pathname + "/"
+    if iv is None:
+        vector = secrets.token_bytes(12)
+    elif isinstance(iv, (bytes, bytearray, memoryview)):
+        vector = bytes(iv)
+    else:
+        raise ValueError("rnd16_iv_invalid")
+    if len(vector) != 12:
+        raise ValueError("rnd16_iv_invalid")
+    plaintext = json.dumps([stamp, nonce, normalized_path], separators=(",", ":")).encode("utf-8")
+    encrypted = AESGCM(_RND16_KEY).encrypt(vector, plaintext, _RND16_AAD)
+    return base64.urlsafe_b64encode(vector + encrypted).decode("ascii").rstrip("=")
 
 
 def normalize_comments(rows):
@@ -143,10 +179,7 @@ def install_comment_compat(plugin):
             web_version="3.0",
             version="999.0.4",
         )
-        # Public web-client protocol constant, not an account credential.
-        key = b"Z7mFG4tQp9Ws2LxB8H"
-        message = key + f"{params['nonce']}{params['_time']}:{params['nonce']}".encode()
-        params["_rnd"] = "15:" + hmac.new(key, message, hashlib.sha256).hexdigest()
+        params["_rnd"] = "16:" + generate_rnd16(params["_time"], params["nonce"], path)
         return signing.SignedRequest(params=params, headers=signed.headers)
 
     signing.RequestSigner.sign = sign

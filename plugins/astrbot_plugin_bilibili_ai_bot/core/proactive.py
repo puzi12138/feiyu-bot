@@ -986,7 +986,7 @@ class ProactiveMixin:
         tid = self._build_tname_to_tid_map().get(tname)
         return bool(tid and tid in set(taste_tids))
 
-    async def _should_watch_video_before_download(self, video, taste_tids, rejected_count, max_rejects):
+    async def _should_watch_video_before_download(self, video, taste_tids, rejected_count, max_rejects, *, _retry_strict=False):
         """下载前按标题做轻量筛选。关注/口味视频直接放行；搜索/视频池最多拒绝 max_rejects 次。"""
         if not video.get("_exploration") and video.get("_source") in {"search", "pool"}:
             import hashlib
@@ -1023,8 +1023,12 @@ UP主：{video.get('up_name', '')}
         try:
             result = (await getattr(self, "_generation_llm_call", self._llm_call)(prompt, max_tokens=40) or "").strip().lower()
         except Exception as e:
+            if _retry_strict:
+                raise  # The single new-content opportunity must not hide a second model error.
             logger.debug(f"[BiliBot] 看片前筛选失败，默认放行: {e}")
             return True, "筛选失败，默认看"
+        if _retry_strict and not result:
+            raise ValueError("retry_prefilter_empty")
         if result.startswith("no") or result.startswith("不") or result.startswith("否"):
             return False, result[:40]
         return True, result[:40] or "想看"
@@ -1484,7 +1488,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
 
     # ── 主流程 ──
     async def _run_proactive(self, max_watch=None, max_comment=None, automatic=True,
-                             owner_share_requested=False):
+                             owner_share_requested=False, _retry_attempt=None):
         token = _AUTO_BROWSE.set(automatic)
         share_token = _MANUAL_OWNER_SHARE.set(owner_share_requested is True and not automatic)
         if _auto_browse_paused():
@@ -1494,7 +1498,11 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
         if hasattr(self, "_set_cross_platform_activity"):
             self._set_cross_platform_activity("proactive", "正在挑选视频")
         try:
-            await self._run_proactive_inner(max_watch=max_watch, max_comment=max_comment)
+            if _retry_attempt is None:
+                await self._run_proactive_inner(max_watch=max_watch, max_comment=max_comment)
+            else:
+                await self._run_proactive_inner(max_watch=max_watch, max_comment=max_comment,
+                                                _retry_attempt=_retry_attempt)
         except asyncio.CancelledError:
             logger.info("[BiliBot] 主动看视频任务被取消")
         except Exception as e:
@@ -1505,7 +1513,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             _MANUAL_OWNER_SHARE.reset(share_token)
             _AUTO_BROWSE.reset(token)
 
-    async def _run_proactive_inner(self, max_watch=None, max_comment=None):
+    async def _run_proactive_inner(self, max_watch=None, max_comment=None, *, _retry_attempt=None):
         if _auto_browse_paused():
             return
         env = self._get_environment_status()
@@ -1513,6 +1521,13 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             logger.warning("[BiliBot] 当前环境不满足视频媒体分析条件，将回退为纯文本视频分析。")
         is_manual = max_watch is not None
         daily_watch = max_watch if is_manual else self.config.get("PROACTIVE_VIDEO_COUNT", 3)
+        if _retry_attempt is not None:
+            # A new-content retry is still an automatic watch. Passing
+            # max_watch=1 would wrongly switch the existing manual branch.
+            helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+            if is_manual or not helper.valid_run(self, _retry_attempt):
+                return
+            daily_watch = min(daily_watch, 1)
         daily_comment_limit = max_comment if max_comment is not None else self.config.get("PROACTIVE_COMMENT_DAILY_LIMIT", 2)
         daily_comment_limit = max(0, int(daily_comment_limit or 0))
         watch_log = self._load_json(WATCH_LOG_FILE, [])
@@ -1682,7 +1697,18 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             bvid = video["bvid"]
             if str(video.get("up_mid", "")) == self.config.get("DEDE_USER_ID", ""):
                 continue
-            allow_watch, prefilter_reason = await self._should_watch_video_before_download(video, taste_tids, prefilter_rejected, prefilter_max_rejects)
+            if _retry_attempt is not None:
+                helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+                eligible = await helper.eligible_before_watch(self, _retry_attempt, bvid)
+                if eligible is None:
+                    return  # Unavailable history closes, rather than searching blindly.
+                if eligible is not True:
+                    continue
+            if _retry_attempt is None:
+                allow_watch, prefilter_reason = await self._should_watch_video_before_download(video, taste_tids, prefilter_rejected, prefilter_max_rejects)
+            else:
+                allow_watch, prefilter_reason = await self._should_watch_video_before_download(
+                    video, taste_tids, prefilter_rejected, prefilter_max_rejects, _retry_strict=True)
             if not allow_watch:
                 prefilter_rejected += 1
                 logger.info(f"[BiliBot] 🧭 标题筛选跳过({prefilter_rejected}/{prefilter_max_rejects})：{video['title']} | {prefilter_reason}")
@@ -1692,6 +1718,10 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             )
             if not watch_reservation.success:
                 continue
+            if _retry_attempt is not None:
+                helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+                if not await helper.watch_started(self, _retry_attempt, bvid, watch_reservation):
+                    return
             if hasattr(self, "_set_cross_platform_activity"):
                 self._set_cross_platform_activity("proactive", "正在分析视频", title=video.get("title", ""), up_name=video.get("up_name", ""))
             source_note = {"follow": "关注", "search": "搜索", "pool": "视频池"}.get(video.get("_source", ""), "候选")
@@ -1740,6 +1770,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 watch_log = self._append_json_list(WATCH_LOG_FILE, watch_log.pop(), cap=200)
                 watched_bvids.add(bvid)
                 watch_count += 1
+                if _retry_attempt is not None:
+                    return
                 continue
             try:
                 score = round(max(1.0, min(10.0, float(evaluation.get("score", 5)))), 1)
@@ -2051,16 +2083,27 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     "storyboard_segments_total": analysis_info.get("_storyboard_segments_total", 0),
                 }
                 self._save_json(VIDEO_MEMORY_FILE, vc)
-                _enqueue_successful_automatic_watch(bvid, log_entry["time"])
+                queued = _enqueue_successful_automatic_watch(bvid, log_entry["time"])
+                if _retry_attempt is not None:
+                    helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+                    helper.watch_completed(self, _retry_attempt, bvid, log_entry["time"], queued)
             except Exception as e:
                 logger.debug(f"[BiliBot] 写入视频缓存失败: {e}")
             watched_bvids.add(bvid)
             watch_count += 1
+            if _retry_attempt is not None:
+                return  # One video, and no artificial 30–120 second wait.
             action_str = " ".join(actions) if actions else "（默默看完）"
             logger.info(f"[BiliBot] 📊 互动：{action_str}")
             wait = random.randint(30, 120)
             logger.info(f"[BiliBot] ⏳ 等待 {wait} 秒...")
-            await asyncio.sleep(wait)
+            try:
+                helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+            except ImportError:
+                await asyncio.sleep(wait)
+            else:
+                if await helper.interruptible_wait(self, wait):
+                    return
         logger.info(
             f"[BiliBot] 🎉 刷B站完成！看了 {watch_count} 个视频，"
             f"本轮评论了 {max(0, comment_count - comments_before_run)} 条"

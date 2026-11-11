@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,7 +15,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .feiyu_comment_emoji import sanitize_native_emojis
-from .image_dns import _DNS_TIMEOUT, OFFICIAL_IMAGE_HOSTS, _secure_dns_once
+from .image_dns import OFFICIAL_IMAGE_HOSTS, _secure_dns_once
+
+_DNS_RETRY_DELAY = 0.25
+_DNS_TOTAL_TIMEOUT = 10.25
 
 PROFILE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -43,6 +47,83 @@ class SecurityError(ValueError):
 
 class ImageHostResolutionError(SecurityError):
     """An observed official image host could not be safely resolved."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str = "unknown",
+        reason: str = "unknown",
+        cause: str = "unknown",
+        attempts: int = 0,
+    ) -> None:
+        """Keep fixed diagnostic fields visible through existing error logs.
+
+        Args:
+            message: The existing fixed error description, never a cause message.
+            phase: A fixed system or secure-DNS phase.
+            reason: A fixed failure category.
+            cause: An allowlisted exception class name.
+            attempts: The number of secure-DNS attempts started.
+        """
+        self.phase = (
+            phase
+            if type(phase) is str
+            and phase
+            in {
+                "system_dns",
+                "secure_dns",
+                "connect",
+                "write",
+                "read_headers",
+                "validate_http",
+                "read_body",
+                "validate_dns",
+                "close",
+            }
+            else "unknown"
+        )
+        self.reason = (
+            reason
+            if type(reason) is str
+            and reason
+            in {
+                "system_error",
+                "empty_result",
+                "timeout",
+                "total_timeout",
+                "connection_reset",
+                "tls_error",
+                "http_status",
+                "response_validation",
+                "other",
+            }
+            else "unknown"
+        )
+        self.cause = (
+            cause
+            if type(cause) is str
+            and cause
+            in {
+                "gaierror",
+                "TimeoutError",
+                "ConnectionResetError",
+                "SSLError",
+                "SSLCertVerificationError",
+                "IncompleteReadError",
+                "LimitOverrunError",
+                "ValueError",
+                "OSError",
+            }
+            else "unknown"
+        )
+        self.attempts = (
+            attempts if type(attempts) is int and attempts in {0, 1, 2} else 0
+        )
+        super().__init__(
+            f"{message} [dns phase={self.phase} reason={self.reason} "
+            f"cause={self.cause} attempts={self.attempts}]"
+        )
 
 
 def validate_profile_id(profile_id: str) -> str:
@@ -244,6 +325,10 @@ def validate_public_https_url(url: str) -> str:
 async def resolve_public_host(hostname: str) -> set[str]:
     """Validate system answers, with a bounded official-host fake-IP fallback.
 
+    Only an explicit secure-DNS transport timeout or reset can start one retry.
+    The two five-second attempts, cleanup and 250ms backoff share 10.25 seconds;
+    the existing system resolver and all image/model budgets are unchanged.
+
     Args:
         hostname: The hostname from an already validated public HTTPS image URL.
 
@@ -260,7 +345,12 @@ async def resolve_public_host(hostname: str) -> set[str]:
         results = await loop.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
     except OSError as error:
         if hostname in OFFICIAL_IMAGE_HOSTS:
-            raise ImageHostResolutionError("官方图片域名系统解析失败") from error
+            raise ImageHostResolutionError(
+                "官方图片域名系统解析失败",
+                phase="system_dns",
+                reason="system_error",
+                cause=type(error).__name__,
+            ) from error
         raise
     try:
         addresses = {str(item[4][0]) for item in results}
@@ -269,21 +359,71 @@ async def resolve_public_host(hostname: str) -> set[str]:
         raise SecurityError("图片域名解析结果无效") from error
     if not addresses:
         if hostname in OFFICIAL_IMAGE_HOSTS:
-            raise ImageHostResolutionError("官方图片域名未返回解析地址")
+            raise ImageHostResolutionError(
+                "官方图片域名未返回解析地址",
+                phase="system_dns",
+                reason="empty_result",
+            )
         raise SecurityError("图片域名无法解析")
     fake_network = ipaddress.ip_network("198.18.0.0/15")
     fake_count = sum(ip.version == 4 and ip in fake_network for ip in parsed)
     if fake_count:
         if fake_count != len(parsed) or hostname not in OFFICIAL_IMAGE_HOSTS:
             raise SecurityError("图片域名解析到内网或保留地址")
+        deadline = loop.time() + _DNS_TOTAL_TIMEOUT
+        attempt = 0
         try:
-            resolved = await asyncio.wait_for(
-                _secure_dns_once(hostname), timeout=_DNS_TIMEOUT
-            )
-        except Exception as error:
-            raise ImageHostResolutionError("官方图片域名安全备用解析失败") from error
-        # The HTTPS DNS parser has already checked the question and CNAME chain.
-        return {address for _family, address in resolved}
+            async with asyncio.timeout_at(deadline):
+                for attempt in (1, 2):
+                    try:
+                        resolved = await _secure_dns_once(hostname)
+                    except Exception as error:
+                        # Retry only an explicit transport timeout or reset. TLS,
+                        # HTTP and DNS validation failures retain one attempt.
+                        transient = isinstance(
+                            error, (TimeoutError, ConnectionResetError)
+                        ) and getattr(error, "image_dns_phase", "secure_dns") in {
+                            "secure_dns",
+                            "connect",
+                            "write",
+                            "read_headers",
+                            "read_body",
+                        }
+                        if (
+                            attempt == 1
+                            and transient
+                            and not isinstance(error, ssl.SSLError)
+                            and deadline - loop.time() > _DNS_RETRY_DELAY
+                        ):
+                            await asyncio.sleep(_DNS_RETRY_DELAY)
+                            continue
+                        raise ImageHostResolutionError(
+                            "官方图片域名安全备用解析失败",
+                            phase=getattr(error, "image_dns_phase", "secure_dns"),
+                            reason=getattr(
+                                error,
+                                "image_dns_reason",
+                                "timeout"
+                                if isinstance(error, TimeoutError)
+                                else "connection_reset"
+                                if isinstance(error, ConnectionResetError)
+                                else "tls_error"
+                                if isinstance(error, ssl.SSLError)
+                                else "other",
+                            ),
+                            cause=type(error).__name__,
+                            attempts=attempt,
+                        ) from error
+                    # The parser has checked the question and complete CNAME chain.
+                    return {address for _family, address in resolved}
+        except TimeoutError as error:
+            raise ImageHostResolutionError(
+                "官方图片域名安全备用解析失败",
+                phase="secure_dns",
+                reason="total_timeout",
+                cause="TimeoutError",
+                attempts=attempt,
+            ) from error
     for ip in parsed:
         if not ip.is_global or ip.is_multicast:
             raise SecurityError("图片域名解析到内网或保留地址")

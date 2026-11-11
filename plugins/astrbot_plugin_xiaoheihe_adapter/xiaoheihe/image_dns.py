@@ -122,6 +122,9 @@ async def _secure_dns_once(host):
 
     Raises:
         ValueError: If the destination or HTTP/DNS response is unsafe.
+        TimeoutError: If this query and cleanup reach their five-second deadline.
+        OSError: If the fixed HTTPS resolver cannot be reached safely.
+        asyncio.CancelledError: If the owning event is cancelled.
     """
     if host not in _HOSTS:
         raise ValueError("image_dns")
@@ -129,101 +132,159 @@ async def _secure_dns_once(host):
     deadline = loop.time() + _DNS_TIMEOUT
     writer = None
     cancelled = False
+    failed = False
+    completed = False
+    result = None
+    phase = "connect"
     try:
-        reader, writer = await asyncio.open_connection(
-            _DNS_IP,
-            443,
-            family=socket.AF_INET,
-            flags=socket.AI_NUMERICHOST,
-            ssl=ssl.create_default_context(),
-            server_hostname=_DNS_HOST,
-            limit=16384,
-        )
-        request = (
-            f"GET /resolve?name={host}&type=A HTTP/1.1\r\nHost: {_DNS_HOST}\r\n"
-            "Accept: application/dns-json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
-        )
-        writer.write(request.encode("ascii"))
-        await writer.drain()
-        raw_header = await reader.readuntil(b"\r\n\r\n")
-        if len(raw_header) > 16384:
-            raise ValueError("image_dns_header")
-        lines = raw_header[:-4].split(b"\r\n")
-        if not re.fullmatch(rb"HTTP/1\.[01] 200(?: [\x20-\x7e]*)?", lines[0]):
-            raise ValueError("image_dns_status")
-        headers = {}
-        for line in lines[1:]:
-            name, sep, value = line.partition(b":")
-            if (
-                not sep
-                or not re.fullmatch(rb"[A-Za-z0-9-]+", name)
-                or name.lower() in headers
-            ):
-                raise ValueError("image_dns_header")
-            headers[name.lower()] = value.strip().lower()
-        if headers.get(b"content-encoding", b"identity") != b"identity" or headers.get(
-            b"content-type", b""
-        ).split(b";", 1)[0] not in {b"application/json", b"application/dns-json"}:
-            raise ValueError("image_dns_encoding")
-        length, transfer = (
-            headers.get(b"content-length"),
-            headers.get(b"transfer-encoding"),
-        )
-        if transfer is not None and (transfer != b"chunked" or length is not None):
-            raise ValueError("image_dns_encoding")
-        chunks, total = [], 0
-        if length is not None:
-            if (
-                not re.fullmatch(rb"[0-9]{1,8}", length)
-                or not 1 <= int(length) <= _DNS_MAX_BYTES
-            ):
-                raise ValueError("image_dns_size")
-            body = await reader.readexactly(int(length))
-        elif transfer == b"chunked":
-            while True:
-                line = await reader.readuntil(b"\r\n")
-                if not re.fullmatch(rb"[0-9A-Fa-f]{1,8}\r\n", line):
+        async with asyncio.timeout_at(deadline):
+            try:
+                reader, writer = await asyncio.open_connection(
+                    _DNS_IP,
+                    443,
+                    family=socket.AF_INET,
+                    flags=socket.AI_NUMERICHOST,
+                    ssl=ssl.create_default_context(),
+                    server_hostname=_DNS_HOST,
+                    limit=16384,
+                )
+                request = (
+                    f"GET /resolve?name={host}&type=A HTTP/1.1\r\nHost: {_DNS_HOST}\r\n"
+                    "Accept: application/dns-json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+                )
+                phase = "write"
+                writer.write(request.encode("ascii"))
+                await writer.drain()
+                phase = "read_headers"
+                raw_header = await reader.readuntil(b"\r\n\r\n")
+                phase = "validate_http"
+                if len(raw_header) > 16384:
+                    raise ValueError("image_dns_header")
+                lines = raw_header[:-4].split(b"\r\n")
+                if not re.fullmatch(rb"HTTP/1\.[01] 200(?: [\x20-\x7e]*)?", lines[0]):
+                    raise ValueError("image_dns_status")
+                headers = {}
+                for line in lines[1:]:
+                    name, sep, value = line.partition(b":")
+                    if (
+                        not sep
+                        or not re.fullmatch(rb"[A-Za-z0-9-]+", name)
+                        or name.lower() in headers
+                    ):
+                        raise ValueError("image_dns_header")
+                    headers[name.lower()] = value.strip().lower()
+                if headers.get(
+                    b"content-encoding", b"identity"
+                ) != b"identity" or headers.get(b"content-type", b"").split(b";", 1)[
+                    0
+                ] not in {b"application/json", b"application/dns-json"}:
                     raise ValueError("image_dns_encoding")
-                size = int(line[:-2], 16)
-                if size == 0:
-                    if await reader.readexactly(2) != b"\r\n":
-                        raise ValueError("image_dns_encoding")
-                    break
-                total += size
-                if total > _DNS_MAX_BYTES:
-                    raise ValueError("image_dns_size")
-                part = await reader.readexactly(size + 2)
-                if part[-2:] != b"\r\n":
+                length, transfer = (
+                    headers.get(b"content-length"),
+                    headers.get(b"transfer-encoding"),
+                )
+                if transfer is not None and (
+                    transfer != b"chunked" or length is not None
+                ):
                     raise ValueError("image_dns_encoding")
-                chunks.append(part[:-2])
-            body = b"".join(chunks)
-        else:
-            while True:
-                part = await reader.read(min(4096, _DNS_MAX_BYTES + 1 - total))
-                if not part:
-                    break
-                total += len(part)
-                if total > _DNS_MAX_BYTES:
-                    raise ValueError("image_dns_size")
-                chunks.append(part)
-            body = b"".join(chunks)
-        return _parse_secure_dns(host, body)
-    except asyncio.CancelledError:
-        cancelled = True
+                phase = "read_body"
+                chunks, total = [], 0
+                if length is not None:
+                    if (
+                        not re.fullmatch(rb"[0-9]{1,8}", length)
+                        or not 1 <= int(length) <= _DNS_MAX_BYTES
+                    ):
+                        raise ValueError("image_dns_size")
+                    body = await reader.readexactly(int(length))
+                elif transfer == b"chunked":
+                    while True:
+                        line = await reader.readuntil(b"\r\n")
+                        if not re.fullmatch(rb"[0-9A-Fa-f]{1,8}\r\n", line):
+                            raise ValueError("image_dns_encoding")
+                        size = int(line[:-2], 16)
+                        if size == 0:
+                            if await reader.readexactly(2) != b"\r\n":
+                                raise ValueError("image_dns_encoding")
+                            break
+                        total += size
+                        if total > _DNS_MAX_BYTES:
+                            raise ValueError("image_dns_size")
+                        part = await reader.readexactly(size + 2)
+                        if part[-2:] != b"\r\n":
+                            raise ValueError("image_dns_encoding")
+                        chunks.append(part[:-2])
+                    body = b"".join(chunks)
+                else:
+                    while True:
+                        part = await reader.read(min(4096, _DNS_MAX_BYTES + 1 - total))
+                        if not part:
+                            break
+                        total += len(part)
+                        if total > _DNS_MAX_BYTES:
+                            raise ValueError("image_dns_size")
+                        chunks.append(part)
+                    body = b"".join(chunks)
+                phase = "validate_dns"
+                result = _parse_secure_dns(host, body)
+                completed = True
+                return result
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            except Exception:
+                failed = True
+                raise
+            finally:
+                if writer is not None:
+                    abort = cancelled or failed
+                    try:
+                        try:
+                            writer.close()
+                        except Exception:  # noqa: BLE001 - cleanup must preserve the primary outcome
+                            abort = True
+                        remaining = deadline - loop.time()
+                        if remaining > 0 and not abort:
+                            phase = "close"
+                            try:
+                                await asyncio.wait_for(
+                                    writer.wait_closed(), timeout=min(0.2, remaining)
+                                )
+                            except asyncio.CancelledError:
+                                abort = True
+                                raise
+                            except Exception:  # noqa: BLE001 - cleanup must preserve the primary outcome
+                                abort = True
+                        else:
+                            abort = True
+                    finally:
+                        if abort:
+                            try:
+                                writer.transport.abort()
+                            except Exception:  # noqa: BLE001, S110 - cleanup must preserve the primary outcome
+                                # Cleanup cannot replace a result, failure or cancellation.
+                                pass
+    except Exception as error:
+        # A complete validated response is still successful if its best-effort
+        # TLS shutdown reaches this attempt's deadline. External cancellation
+        # remains CancelledError and is never converted into success here.
+        if completed and isinstance(error, TimeoutError):
+            return result
+        # Carry only fixed metadata; the original exception and cause remain intact.
+        error.image_dns_phase = phase
+        error.image_dns_reason = (
+            "tls_error"
+            if isinstance(error, ssl.SSLError)
+            else "timeout"
+            if isinstance(error, TimeoutError)
+            else "connection_reset"
+            if isinstance(error, ConnectionResetError)
+            else "http_status"
+            if isinstance(error, ValueError) and str(error) == "image_dns_status"
+            else "response_validation"
+            if isinstance(
+                error,
+                (ValueError, asyncio.IncompleteReadError, asyncio.LimitOverrunError),
+            )
+            else "other"
+        )
         raise
-    finally:
-        if writer is not None:
-            writer.close()
-            remaining = deadline - loop.time()
-            if remaining > 0 and not cancelled:
-                try:
-                    await asyncio.wait_for(
-                        writer.wait_closed(), timeout=min(0.2, remaining)
-                    )
-                except asyncio.CancelledError:
-                    writer.transport.abort()
-                    raise
-                except Exception:  # noqa: BLE001 - cleanup must preserve the primary failure
-                    writer.transport.abort()
-            else:
-                writer.transport.abort()

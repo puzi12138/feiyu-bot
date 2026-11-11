@@ -37,6 +37,7 @@ from . import feiyu_recovery
 from .context_builder import BuiltContext, ContextBuilder
 from .event import XiaoheiheMessageEvent, aggregate_text
 from .feiyu_auto_reply_gate import authorize, block_event, reserve
+from .feiyu_new_content_retry import consume_ready_wake, processing_scope, wait_feed_delay
 from .models import (
     ContentOwnerRole,
     EventState,
@@ -213,6 +214,7 @@ class XiaoheihePlatformAdapter(Platform):
         self.settings = platform_settings or {}
         self._stop = asyncio.Event()
         self._refresh = asyncio.Event()
+        self._retry_wake = asyncio.Event()
         self._service: NotificationService | None = None
         self._context_builder: ContextBuilder | None = None
         self._feed_task: asyncio.Task[Any] | None = None
@@ -373,13 +375,13 @@ class XiaoheihePlatformAdapter(Platform):
                     str(self.config.get("profile_id", "default")),
                     exc,
                 )
-                await asyncio.sleep(max(300, interval))
-            try:
-                jitter_ms = secrets.randbelow(max(0, jitter) * 1000 + 1)
-                delay = max(300, interval) + jitter_ms / 1000
-                await asyncio.wait_for(self._refresh.wait(), timeout=delay)
-            except TimeoutError:
+                if await wait_feed_delay(self, feed, max(300, interval)):
+                    continue
+            if consume_ready_wake(self, feed):
                 continue
+            jitter_ms = secrets.randbelow(max(0, jitter) * 1000 + 1)
+            delay = max(300, interval) + jitter_ms / 1000
+            await wait_feed_delay(self, feed, delay)
 
     async def _stop_profile_services(self) -> None:
         profile_id = str(self.config.get("profile_id", "default"))
@@ -574,30 +576,34 @@ class XiaoheihePlatformAdapter(Platform):
                     await block_event(runtime.repository, event_id, "context_not_authorized")
                     return
 
-                async def context_authorized() -> bool:
-                    return await authorize(runtime.repository, event_id, notification.route, phase="context")
+                async with processing_scope(self, notification, event_id) as permitted:
+                    if not permitted:
+                        await block_event(runtime.repository, event_id, "fresh_retry_not_authorized")
+                        return
+                    async def context_authorized() -> bool:
+                        return await authorize(runtime.repository, event_id, notification.route, phase="context")
 
-                context = await self._context_builder.build(
-                    notification, client, authorize=context_authorized,
-                )
-                await runtime.repository.mark_event(event_id, EventState.CONTEXT_READY)
-                await runtime.repository.record_session(notification.route)
-                await runtime.repository.mark_event(event_id, EventState.DISPATCHED)
-                feed_config = runtime.config.snapshot()["proactive_feed"]
-                dry_run, review_required = proactive_delivery_settings(feed_config)
-                await self._dispatch(
-                    event_id,
-                    notification,
-                    context,
-                    PermissionDecision(True, "主动帖子合成事件"),
-                    capture_candidate=review_required,
-                    candidate_metadata={
-                        **metadata,
-                        "post_author_uid": notification.post_author_uid,
-                    },
-                    dry_run_override=dry_run,
-                    proactive=True,
-                )
+                    context = await self._context_builder.build(
+                        notification, client, authorize=context_authorized,
+                    )
+                    await runtime.repository.mark_event(event_id, EventState.CONTEXT_READY)
+                    await runtime.repository.record_session(notification.route)
+                    await runtime.repository.mark_event(event_id, EventState.DISPATCHED)
+                    feed_config = runtime.config.snapshot()["proactive_feed"]
+                    dry_run, review_required = proactive_delivery_settings(feed_config)
+                    await self._dispatch(
+                        event_id,
+                        notification,
+                        context,
+                        PermissionDecision(True, "主动帖子合成事件"),
+                        capture_candidate=review_required,
+                        candidate_metadata={
+                            **metadata,
+                            "post_author_uid": notification.post_author_uid,
+                        },
+                        dry_run_override=dry_run,
+                        proactive=True,
+                    )
             except RequestNotAuthorized:
                 await block_event(runtime.repository, event_id, "context_not_authorized")
                 return

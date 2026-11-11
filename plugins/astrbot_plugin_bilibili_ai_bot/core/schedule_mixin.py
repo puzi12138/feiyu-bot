@@ -5,9 +5,11 @@ import json
 import math
 import random
 import re
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta
+from importlib import import_module
 
 from astrbot.api import logger
 from .peak_bridge import automatic_bili_allowed, peak_active
@@ -28,6 +30,31 @@ class ScheduleMixin:
     _SCHEDULE_TRIGGER_GRACE_MINUTES = 5
     _PLAN_GENERATION_WINDOW_MINUTES = 15
     _PLAN_RETRY_GRACE_MINUTES = 5
+
+    def _bili_incident_browse_ready(self):
+        """Require this instance's current F060 browse wrappers before work.
+
+        Bili may initialize before the steward; a ready cooldown alone is not
+        proof that a durable pause or the protected action gates are bound.
+        A missing or retired owner simply postpones the normal opportunity.
+        """
+        try:
+            module = sys.modules.get("data.plugins.feiyu_steward.incident_hooks")
+            owner = getattr(module, "_ACTIVE_INCIDENT_HOOKS", None)
+            if (owner is None or owner._active is not True
+                    or getattr(owner.host, "_incident_hooks", None) is not owner
+                    or owner.host.plugin("astrbot_plugin_bilibili_ai_bot") is not self
+                    or owner._blocked("bili_browse") is not False):
+                return False
+            required = ("bili_poll", "bili_poll_finish", "bili_browse", "bili_inner", "bili_action")
+            for key in required:
+                binding = owner._bindings.get(key)
+                if (not isinstance(binding, dict) or binding.get("object") is not self
+                        or getattr(self, binding.get("name", ""), None) is not binding.get("wrapped")):
+                    return False
+            return True
+        except Exception:  # noqa: BLE001 - Starting unguarded is never a fallback.
+            return False
 
     def _interest_driven_schedule_enabled(self):
         """Only an explicit boolean opt-in replaces the legacy daily schedule."""
@@ -80,7 +107,7 @@ class ScheduleMixin:
             raise ValueError("interest_poll_record_invalid")
         return value
 
-    async def _reserve_interest_proactive(self):
+    async def _reserve_interest_proactive(self, *, _retry_attempt=None):
         """Use the existing SQLite KV and transaction lock, not another ledger.
 
         A reservation is consumed even if task creation/work is interrupted.
@@ -89,6 +116,14 @@ class ScheduleMixin:
         db = getattr(getattr(self, "layered_runtime", None), "db", None)
         if db is None or not db.is_open:
             raise RuntimeError("interest_poll_storage_unavailable")
+        retry_helper = None
+        if _retry_attempt is not None:
+            try:
+                retry_helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+                if not retry_helper.valid_coordinator(self, _retry_attempt):
+                    return None
+            except Exception:
+                return None
         poll = self._interest_proactive_poll_seconds()
         token = uuid.uuid4().hex
 
@@ -101,6 +136,10 @@ class ScheduleMixin:
             row = conn.execute("SELECT value,expires_at FROM kv WHERE key=?", (self._INTEREST_POLL_KEY,)).fetchone()
             value = self._interest_poll_record(row)
             if value is not None:
+                if retry_helper is not None and value["phase"] == "reserved":
+                    # A prior opportunity may still be in flight even when
+                    # its nominal deadline passed. Never replace its token.
+                    return None
                 # A newly observed persisted deadline maps to remaining local
                 # monotonic time. A wall-clock jump cannot shorten that wait
                 # within this instance; clock rollback remains conservative.
@@ -110,9 +149,14 @@ class ScheduleMixin:
                         getattr(self, "_interest_proactive_next_monotonic", 0.0),
                         tick + max(0.0, value["next_due"] - wall),
                     )
-                if (wall < value["next_due"]
-                        or tick < getattr(self, "_interest_proactive_next_monotonic", 0.0)):
-                    return None
+                early = (wall < value["next_due"]
+                         or tick < getattr(self, "_interest_proactive_next_monotonic", 0.0))
+                if early:
+                    # Only this already-armed owner grant may bypass cooling,
+                    # never an unfinished reservation or an arbitrary caller.
+                    if (retry_helper is None or value["phase"] != "cooldown"
+                            or not retry_helper.valid_in_transaction(self, _retry_attempt)):
+                        return None
                 if (value["phase"] == "reserved"
                         and value["token"] != getattr(self, "_interest_poll_owned_token", None)):
                     # A competing due claim is not known to have completed.
@@ -120,8 +164,11 @@ class ScheduleMixin:
                     raise RuntimeError("interest_poll_unfinished_reservation")
             # No v1 record means migration, not evidence that a poll is due.
             # Commit one full cooldown without starting work the first time.
+            if retry_helper is not None and value is None:
+                return None  # Initial migration is not a confirmed old cooldown.
             fresh = {"version": 1, "token": token,
-                     "phase": "reserved" if value is not None else "cooldown", "next_due": wall + poll}
+                     "phase": "reserved" if value is not None else "cooldown",
+                     "next_due": max(value["next_due"] if value else 0, wall + poll)}
             conn.execute(
                 "INSERT INTO kv(key,value,updated_at,expires_at) VALUES(?,?,?,NULL) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at,expires_at=NULL",
@@ -130,7 +177,7 @@ class ScheduleMixin:
             # Set local ownership while still under the same shared lock.
             # A second caller can acquire it before this await resumes.
             self._interest_poll_owned_token = token if value is not None else None
-            return (token, value is not None, tick, poll)
+            return (token, value is not None, tick, max(poll, fresh["next_due"] - wall))
 
         async def cancelled(result):
             if result is not None and result[1]:
@@ -175,26 +222,35 @@ class ScheduleMixin:
         self._interest_poll_seen_token = value["token"]
         self._interest_proactive_next_monotonic = tick + max(poll, value["next_due"] - wall)
 
-    async def _maybe_run_interest_proactive(self, now=None):
+    async def _maybe_run_interest_proactive(self, now=None, *, _retry_attempt=None):
         """Start at most one discovery task when its technical poll is due.
 
         The watcher retains its persisted watched-video/action deduplication.
         A discovery opportunity is not an instruction to share or comment.
         """
-        if not automatic_bili_allowed():
+        if not self._bili_incident_browse_ready() or not automatic_bili_allowed():
             return False
         if not self._interest_driven_schedule_enabled() or not self._schedule_feature_enabled("proactive"):
             return False
+        retry_helper = None
+        if _retry_attempt is not None:
+            try:
+                retry_helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+                if not retry_helper.valid_coordinator(self, _retry_attempt):
+                    return False
+            except Exception:
+                return False
         task = getattr(self, "_proactive_task", None)
         if task is not None and not task.done():
             return False
-        token = await self._reserve_interest_proactive()
+        token = await self._reserve_interest_proactive(_retry_attempt=_retry_attempt)
         if token is None:
             return False
         # Waiting for the writer lock yields: explicit settings, the time gate,
         # or a manual task may have changed. Consume this opportunity if so.
-        if (not automatic_bili_allowed() or not self._interest_driven_schedule_enabled()
-                or not self._schedule_feature_enabled("proactive")):
+        if (not self._bili_incident_browse_ready() or not automatic_bili_allowed() or not self._interest_driven_schedule_enabled()
+                or not self._schedule_feature_enabled("proactive")
+                or (retry_helper is not None and not retry_helper.valid_coordinator(self, _retry_attempt))):
             await self._finish_interest_proactive(token)
             return False
         task = getattr(self, "_proactive_task", None)
@@ -202,13 +258,24 @@ class ScheduleMixin:
             await self._finish_interest_proactive(token)
             return False
         # The shared transaction commits before task creation or business I/O.
-        self._proactive_task = asyncio.create_task(self._run_interest_proactive_once(token))
+        self._proactive_task = asyncio.create_task(self._run_interest_proactive_once(token, _retry_attempt=_retry_attempt))
+        if retry_helper is not None and not retry_helper.bind_run_task(self, _retry_attempt, self._proactive_task):
+            self._proactive_task.cancel()
+            await asyncio.gather(self._proactive_task, return_exceptions=True)
+            self._proactive_task = None
+            await self._finish_interest_proactive(token)
+            return False
         logger.info("[BiliBot] 兴趣浏览：开始发现内容，表达与分享由实际兴趣决定")
         return True
 
-    async def _run_interest_proactive_once(self, token):
+    async def _run_interest_proactive_once(self, token, *, _retry_attempt=None):
         try:
-            await self._run_proactive()
+            if _retry_attempt is None:
+                await self._run_proactive()
+            else:
+                helper = import_module("data.plugins.feiyu_steward.bili_immediate_retry")
+                if helper.valid_run(self, _retry_attempt):
+                    await self._run_proactive(_retry_attempt=_retry_attempt)
         finally:
             await self._finish_interest_proactive(token)
 

@@ -7,7 +7,7 @@ import math
 import os
 import re
 import sqlite3
-from contextlib import closing, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,7 @@ from pathlib import Path
 from .bili_journal_gate import bvid_for_committed_note
 from .bili_recommendation import public_recommendation_reason
 from .failure_diagnostics import describe_failure, record_failure
+from .new_content_retry import content_hash
 from .peak_policy import automatic_peak_paused
 from .policy import OWNER_UMO, TZ
 from .private_review_model import (
@@ -34,6 +35,8 @@ _PAGE_LIMIT = 3
 _CHAR_LIMIT = 40000
 _RESUME_SCOPE = ContextVar("feiyu_bili_journal_resume_scope", default=None)
 _OWNER_RECOVERY_SCOPE = ContextVar("feiyu_bili_owner_recovery_scope", default=None)
+_NEW_CONTENT_SCOPE = ContextVar("feiyu_bili_new_content_scope", default=None)
+_NEW_CONTENT_READ_SCOPE = ContextVar("feiyu_bili_new_content_read_scope", default=None)
 _NOT_SHARED = {
     "invalid_bvid", "peak_tariff", "automatic_daytime_unavailable", "journal_required",
     "plugin_unavailable", "daily_limit", "bili_share_time_unavailable", "cooldown",
@@ -122,6 +125,145 @@ def _source_after_resume(watched_at, snapshot):
         return False
 
 
+def _retry_hooks_allowed(steward, *, owner=None):
+    """A durable slot never overrides a retired or locally failed hook owner."""
+    try:
+        hooks = getattr(steward, "_incident_hooks", None)
+        return (hooks is not None
+                and (owner is None or hooks is owner)
+                and getattr(hooks, "host", None) is steward
+                and hooks.retry_local_preflight("bili_journal") is True)
+    except Exception:
+        return False
+
+
+def _retry_intake(steward):
+    """Read one ready trial without granting any business capability."""
+    try:
+        if not _retry_hooks_allowed(steward):
+            return None
+        value = steward.incidents.retry_intake("bili_journal")
+        if (type(value) is not dict or set(value) != {
+                "incident_id", "failed_at", "failed_key_hash"}
+                or type(value["incident_id"]) is not str
+                or re.fullmatch(r"[a-f0-9]{32}", value["incident_id"]) is None
+                or type(value["failed_key_hash"]) is not str
+                or re.fullmatch(r"[a-f0-9]{64}", value["failed_key_hash"]) is None
+                or type(value["failed_at"]) not in (int, float)
+                or not math.isfinite(value["failed_at"])
+                or not 0 < value["failed_at"] <= _now().timestamp()
+                or steward.incidents.retry_intake_allowed(value["incident_id"]) is not True):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def _retry_unread(root, bvid):
+    """Existing humanism reads from any entry point make this video old."""
+    path = root / _HUMANISM
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True,
+                                     timeout=0.2)) as db:
+            return db.execute("SELECT 1 FROM readings WHERE bvid=? LIMIT 1", (bvid,)).fetchone() is None
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
+def _retry_candidate(db, root, row, trial, *, steward=None):
+    """Require a genuinely new watch and a pristine, unreserved queue row."""
+    if (len(row) != 10 or type(row[0]) is not str or not _BV.fullmatch(row[0])
+            or row[2:4] != ("pending", "queued") or row[4] is not None
+            or row[5] is not None or type(row[7]) is not int or row[7] != 0
+            or content_hash("bili_journal", row[0]) == trial["failed_key_hash"]):
+        return None
+    try:
+        from .bili_immediate_retry import immediate_candidate
+        constrained, immediate_observed = immediate_candidate(steward, row, trial) if steward is not None else (False, None)
+        if constrained:
+            # An immediate watch and its journal retry must be the same BV,
+            # even if another automatic source enqueued a newer video.
+            if immediate_observed is None:
+                return None
+            observed = immediate_observed
+        elif _source_after_resume(row[1], (trial["failed_at"], ())):
+            observed = datetime.strptime(row[1], "%Y-%m-%d %H:%M").replace(tzinfo=TZ).timestamp()
+        else:
+            # Same-minute timestamps are accepted only when a genuine current
+            # automatic watch recorded a task-bound seconds-level action proof.
+            from .bili_immediate_retry import observed_same_minute
+            observed = observed_same_minute(steward, row, trial) if steward is not None else None
+            if observed is None:
+                return None
+        created = datetime.fromisoformat(row[8])
+        updated = datetime.fromisoformat(row[9])
+        if (created.tzinfo is None or updated.tzinfo is None
+                or not trial["failed_at"] < created.timestamp() <= updated.timestamp()
+                or updated.timestamp() > _now().timestamp()):
+            return None
+        if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='owner_recovery'").fetchone() is not None
+                and db.execute("SELECT 1 FROM owner_recovery WHERE bvid=?", (row[0],)).fetchone()):
+            return None
+        available, existing = _journal_lookup(root, row[0])
+        if (not available or existing or not _retry_unread(root, row[0])
+                or _native_evidence(root, row[0], row[1]) is None):
+            return None
+        return observed
+    except (ValueError, TypeError, OverflowError, OSError, sqlite3.Error):
+        return None
+
+
+def _retry_select(root, trial, *, steward=None):
+    """Intake reads existing local evidence only; it never reconciles old work."""
+    path = root / _QUEUE
+    if path.is_symlink() or not path.is_file():
+        return None
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        rows = db.execute("SELECT * FROM watched WHERE state='pending' "
+                          "AND phase='queued' AND attempts=0 AND reading_id IS NULL "
+                          "AND note_id IS NULL ORDER BY created_at DESC,bvid LIMIT 200").fetchall()
+        for row in rows:
+            observed_at = _retry_candidate(db, root, row, trial, steward=steward)
+            if observed_at is not None:
+                return row, observed_at
+    return None
+
+
+def _retry_failure(error, bvid, *, model_started):
+    """Only audited model transport metadata can arm a different-content trial."""
+    if not model_started or type(bvid) is not str or not _BV.fullmatch(bvid):
+        return None
+    if type(error) is not PrivateReviewModelError:
+        return None
+    values = BaseException.__dict__["__dict__"].__get__(error)
+    value = values.get("model_failure")
+    if (values.get("code") != "private_review_call_failed" or type(value) is not dict
+            or set(value) != {"kind", "http_status"} or value["http_status"] is not None
+            or type(value["kind"]) is not str or value["kind"] not in {"connection", "timeout"}):
+        return None
+    return {"scope": "bili_journal", "failed_key": bvid,
+            "failure_kind": value["kind"]}
+
+
+def _terminal_model_failure(root, bvid):
+    """End only this pre-journal model attempt; never reset it for replay."""
+    available, existing = _journal_lookup(root, bvid)
+    if not available or existing:
+        return False
+    with closing(_connect(root)) as db:
+        changed = db.execute(
+            "UPDATE watched SET state='unknown',error_code='model_result_unknown',updated_at=? "
+            "WHERE bvid=? AND state='inflight' AND phase='model' AND attempts=1 "
+            "AND reading_id IS NOT NULL AND note_id IS NULL",
+            (_now().isoformat(), bvid),
+        ).rowcount
+        db.commit()
+        return changed == 1
+
+
 def _owner_recovery(db, bvid, snapshot, *, claimed_attempt=None):
     """Validate an exact, locally authorized pre-model recovery receipt.
 
@@ -168,6 +310,22 @@ def _owner_recovery(db, bvid, snapshot, *, claimed_attempt=None):
 
 def journal_generation_allowed():
     """Recheck the active journal generation at the shared outbound action."""
+    trial = _NEW_CONTENT_SCOPE.get()
+    if trial is not None:
+        try:
+            steward, owner, incident_id, token, bvid, event_key = trial
+            if (not _retry_hooks_allowed(steward, owner=owner)
+                    or steward.incidents.retry_check(incident_id, token, bvid, event_key) is not True
+                    or steward.incidents.blocked("bili_journal") is not False):
+                return False
+            read_scope = _NEW_CONTENT_READ_SCOPE.get()
+            # humanism checks this callback both before and after acquiring
+            # its shared lock. Recheck old readings there, before the read
+            # subprocess, so an intervening manual/cron read cannot be reused.
+            return (read_scope is None or len(read_scope) == 2
+                    and read_scope[1] == bvid and _retry_unread(read_scope[0], bvid))
+        except Exception:
+            return False
     scope = _RESUME_SCOPE.get()
     if scope is None:
         return True
@@ -597,7 +755,9 @@ async def review_watched_video(steward, *, root=None):
     root = _root(root)
     diagnostic_root = getattr(steward, "root", None)
     snapshot = _resume_snapshot(steward)
-    if snapshot is None:
+    trial = _retry_intake(steward) if snapshot is None else None
+    retry_hook_owner = getattr(steward, "_incident_hooks", None) if trial is not None else None
+    if snapshot is None and trial is None:
         return {"processed": 0, "status": "incident_feature_paused"}
     if not _allowed(steward):
         return {"processed": 0, "status": "automatic_window_unavailable"}
@@ -610,27 +770,62 @@ async def review_watched_video(steward, *, root=None):
         handle = None
         recovery_attempt = None
         recovery_token = None
+        retry_token = None
+        retry_started = False
+        retry_can_release = False
+        retry_queue_committed = False
+        retry_settled = False
+        retry_outcome = "unknown"
+        retry_context = ExitStack()
+        content_token = None
+        bvid = None
+        model_started = False
+        event_key = None
         resume_token = _RESUME_SCOPE.set((steward, snapshot))
         failure_stage = "bili_journal_prepare"
         def eligible():
+            if trial is not None and not retry_started:
+                return (_allowed(steward) and _retry_hooks_allowed(steward, owner=retry_hook_owner)
+                        and (retry_token is not None
+                        or _retry_intake(steward) == trial))
             return _allowed(steward) and journal_generation_allowed()
         try:
             handle = _worker_lock(root)
             if handle is None:
                 return {"processed": 0, "status": "worker_busy"}
-            with closing(_connect(root)) as db:
-                recovered = _recover_inflight(db, root)
-                enqueued = recover_recent(root)
+            selected = None
+            if trial is not None:
                 if not eligible():
+                    return {"processed": 0, "status": "incident_feature_paused"}
+                selected = _retry_select(root, trial, steward=steward)
+                if selected is None:
+                    return {"processed": 0, "status": "empty"}
+                if not eligible():
+                    return {"processed": 0, "status": "incident_feature_paused"}
+                bvid = selected[0][0]
+                retry_token = steward.incidents.retry_reserve(
+                    trial["incident_id"], bvid, selected[1])
+                if type(retry_token) is not str or not re.fullmatch(r"[a-f0-9]{64}", retry_token):
+                    retry_token = None
+                    return {"processed": 0, "status": "incident_feature_paused"}
+            with closing(_connect(root)) as db:
+                recovered = _recover_inflight(db, root) if trial is None else 0
+                enqueued = recover_recent(root) if trial is None else 0
+                if trial is None and not eligible():
                     return {"processed": 0, "status": "automatic_window_unavailable",
                             "recovered": recovered, "enqueued": enqueued}
                 db.execute("BEGIN IMMEDIATE")
-                rows = db.execute(
-                    "SELECT * FROM watched WHERE state='pending' "
-                    "ORDER BY created_at,bvid LIMIT 200"
-                ).fetchall()
+                rows = ([db.execute("SELECT * FROM watched WHERE bvid=?", (bvid,)).fetchone()]
+                        if trial is not None else db.execute(
+                            "SELECT * FROM watched WHERE state='pending' "
+                            "ORDER BY created_at,bvid LIMIT 200").fetchall())
                 row = None
                 for candidate in rows:
+                    if trial is not None:
+                        if (candidate is not None and candidate == selected[0]
+                                and _retry_candidate(db, root, candidate, trial, steward=steward) == selected[1]):
+                            row = candidate
+                        break
                     authorized, reserved = _owner_recovery(db, candidate[0], snapshot)
                     if authorized or (not reserved and _source_after_resume(candidate[1], snapshot)):
                         row = candidate
@@ -652,15 +847,30 @@ async def review_watched_video(steward, *, root=None):
                     return {"processed": 0, "status": "empty", "recovered": recovered,
                             "enqueued": enqueued}
                 bvid, watched_at, reading_id = row[0], row[1], row[4]
-                db.execute(
+                claimed = db.execute(
                     "UPDATE watched SET state='inflight',phase=?,attempts=attempts+1,"
                     "error_code=NULL,updated_at=? WHERE bvid=? AND state='pending'",
                     ("source" if reading_id else "read", _now().isoformat(), bvid),
                 )
+                if claimed.rowcount != 1:
+                    raise ValueError("queue_claim_unavailable")
                 db.commit()
+                if trial is not None:
+                    # From this point through the local checks below there is
+                    # precise evidence that no source/model call was started.
+                    retry_queue_committed = True
 
                 def finish(state, phase, error=None, *, note_id=None, model_validation=None):
+                    nonlocal retry_outcome, retry_can_release
                     _set_state(db, bvid, state, phase, error, note_id=note_id)
+                    if trial is not None:
+                        retry_can_release = (retry_queue_committed and not retry_started
+                            and ((state == "pending" and error == "automatic_window_unavailable")
+                                 or (state == "skipped" and error in {
+                                     "already_journaled", "incident_generation_changed"})))
+                        retry_outcome = ("success" if state == "skipped" and phase == "model"
+                                         and error == "not_worthy" else
+                                         "failed" if state == "failed" else "unknown")
                     if state == "failed":
                         record_failure(diagnostic_root, "bili_journal", "bili_journal_once",
                                        reason=error, model_validation=model_validation)
@@ -679,10 +889,29 @@ async def review_watched_video(steward, *, root=None):
                 if not eligible():
                     return finish("pending", "queued", "automatic_window_unavailable")
 
+                if trial is not None:
+                    event_key = "bili-journal:" + bvid + ":" + row[8]
+                    if steward.incidents.retry_start(
+                            trial["incident_id"], retry_token, bvid, event_key) is not True:
+                        return finish("skipped", "queued", "incident_generation_changed")
+                    retry_started = True
+                    retry_can_release = False
+                    retry_context.enter_context(steward.incidents.retry_scope(
+                        trial["incident_id"], "event", token=retry_token,
+                        candidate_key=bvid, event_key=event_key))
+                    content_token = _NEW_CONTENT_SCOPE.set(
+                        (steward, retry_hook_owner, trial["incident_id"], retry_token, bvid, event_key))
+
                 expected_duration = None
                 if not reading_id:
                     failure_stage = "bili_journal_read"
-                    read = await steward.humanism_call("read", {"video": bvid}, _automatic=True)
+                    read_token = (_NEW_CONTENT_READ_SCOPE.set((root, bvid))
+                                  if trial is not None else None)
+                    try:
+                        read = await steward.humanism_call("read", {"video": bvid}, _automatic=True)
+                    finally:
+                        if read_token is not None:
+                            _NEW_CONTENT_READ_SCOPE.reset(read_token)
                     if not isinstance(read, dict) or "error" in read:
                         if (isinstance(read, dict) and read.get("error") ==
                                 "BILI_AUTOMATIC_ALREADY_JOURNALED"):
@@ -801,13 +1030,20 @@ async def review_watched_video(steward, *, root=None):
                     "source_truncated": incomplete}}, ensure_ascii=False)
                 try:
                     with _usage_scope():
-                        response = await asyncio.wait_for(
-                            generate_private_review(
-                                steward.context, provider_id, system_prompt=_SYSTEM,
-                                prompt=prompt, max_tokens=3500,
-                                preflight=eligible,
-                            ), timeout=180,
+                        model_started = True
+                        if trial is not None:
+                            from .peak_runtime import same_task_deadline
+                        request = generate_private_review(
+                            steward.context, provider_id, system_prompt=_SYSTEM,
+                            prompt=prompt, max_tokens=3500, preflight=eligible,
                         )
+                        if trial is not None:
+                            # wait_for creates a child task. The once-only
+                            # capability intentionally belongs to this task.
+                            async with same_task_deadline(180):
+                                response = await request
+                        else:
+                            response = await asyncio.wait_for(request, timeout=180)
                 except PrivateReviewModelError as error:
                     if error.code == PRIVATE_REVIEW_WINDOW_UNAVAILABLE:
                         # The helper guarantees this specific error is raised
@@ -820,6 +1056,8 @@ async def review_watched_video(steward, *, root=None):
                     return finish("failed", "model", "invalid_model_or_citation",
                                   model_validation=_validation_metadata(
                                       response, raw, segments, validation_code))
+                if trial is not None and not journal_generation_allowed():
+                    return finish("deferred_manual", "model", "incident_generation_changed")
                 if decision["worthy"] is False:
                     return finish("skipped", "model", "not_worthy")
                 if not eligible():
@@ -881,6 +1119,26 @@ async def review_watched_video(steward, *, root=None):
                     return finish("unknown", "journal", "journal_receipt_unverified")
                 if receipt["deduplicated"]:
                     return finish("skipped", "journal", "journal_deduplicated", note_id=note_id)
+                if trial is not None:
+                    # A newly committed, identity-verified note completes the
+                    # journal trial. Sharing has its own independent incident
+                    # and receipt guards, and receives no trial capability.
+                    if not journal_generation_allowed():
+                        return finish("committed_deferred", "journal",
+                                      "incident_generation_changed", note_id=note_id)
+                    retry_settled = True
+                    settled = await steward.incidents.retry_finish(
+                        trial["incident_id"], retry_token, bvid, event_key, outcome="success")
+                    if content_token is not None:
+                        _NEW_CONTENT_SCOPE.reset(content_token)
+                        content_token = None
+                    retry_context.close()
+                    snapshot = _resume_snapshot(steward) if settled is True else None
+                    _RESUME_SCOPE.reset(resume_token)
+                    resume_token = _RESUME_SCOPE.set((steward, snapshot))
+                    if snapshot is None:
+                        return finish("committed_deferred", "journal",
+                                      "incident_generation_changed", note_id=note_id)
                 if not eligible():
                     return finish("committed_deferred", "journal", "window_after_commit", note_id=note_id)
                 _set_state(db, bvid, "inflight", "share", note_id=note_id)
@@ -920,11 +1178,35 @@ async def review_watched_video(steward, *, root=None):
         except Exception as error:  # noqa: BLE001 - Keep provider details out of local status.
             diagnostic = describe_failure(error, failure_stage)
             record_failure(diagnostic_root, "bili_journal", failure_stage, error=error)
-            return {"processed": 0, "status": "worker_unavailable",
-                    "error_class": diagnostic["error_class"]}
+            result = {"processed": 0, "status": "worker_unavailable",
+                      "error_class": diagnostic["error_class"]}
+            retry = _retry_failure(error, bvid, model_started=model_started)
+            if retry is not None and recovery_attempt is None:
+                try:
+                    terminal = _terminal_model_failure(root, bvid)
+                except (OSError, sqlite3.Error, ValueError, TypeError):
+                    terminal = False
+                if terminal and trial is None:
+                    result["_retry_failure"] = retry
+                    result["_retry_terminal"] = True
+            return result
         finally:
-            if recovery_token is not None:
-                _OWNER_RECOVERY_SCOPE.reset(recovery_token)
-            _RESUME_SCOPE.reset(resume_token)
-            if handle is not None:
-                _unlock_worker(handle)
+            try:
+                if trial is not None and retry_started and not retry_settled:
+                    if retry_outcome == "success" and not journal_generation_allowed():
+                        retry_outcome = "unknown"
+                    await steward.incidents.retry_finish(
+                        trial["incident_id"], retry_token, bvid, event_key,
+                        outcome=retry_outcome)
+                elif trial is not None and retry_can_release:
+                    steward.incidents.retry_release(
+                        trial["incident_id"], retry_token, bvid, definitely_not_started=True)
+            finally:
+                if content_token is not None:
+                    _NEW_CONTENT_SCOPE.reset(content_token)
+                retry_context.close()
+                if recovery_token is not None:
+                    _OWNER_RECOVERY_SCOPE.reset(recovery_token)
+                _RESUME_SCOPE.reset(resume_token)
+                if handle is not None:
+                    _unlock_worker(handle)

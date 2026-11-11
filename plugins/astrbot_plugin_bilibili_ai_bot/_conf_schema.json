@@ -1704,5 +1704,15 @@
     "type": "int",
     "default": 5,
     "hint": "建议 3-8"
+  },
+  "BUVID3": {
+    "description": "【系统】B站设备标识 BUVID3（自动获取并缓存）",
+    "type": "string",
+    "default": ""
+  },
+  "BUVID4": {
+    "description": "【系统】B站设备标识 BUVID4（自动获取并缓存）",
+    "type": "string",
+    "default": ""
   }
 }
