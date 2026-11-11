@@ -98,6 +98,111 @@ def normalize_comments(rows):
     return result
 
 
+def _guard_heybox_proxy_transport(client):
+    """Guard only this owned proxy pool; do not touch globally shared classes."""
+    import httpcore
+    from httpcore._async.http_proxy import AsyncTunnelHTTPConnection
+    from httpcore._synchronization import AsyncShieldCancellation
+
+    if (httpx.__version__, httpcore.__version__) != ("0.28.1", "1.0.9"):
+        raise RuntimeError("heybox_tunnel_guard_unsupported_http_stack")
+    if type(client) is not httpx.AsyncClient or client.is_closed or len(client._mounts) != 1:
+        raise RuntimeError("heybox_tunnel_guard_client_mismatch")
+    transport = client._transport_for_url(httpx.URL("https://unit.invalid/"))
+    if (type(transport) is not httpx.AsyncHTTPTransport
+            or transport is not client._transport_for_url(httpx.URL("http://unit.invalid/"))
+            or type(transport._pool) is not httpcore.AsyncHTTPProxy):
+        raise RuntimeError("heybox_tunnel_guard_transport_mismatch")
+    pool = transport._pool
+    origin = pool._proxy_url.origin
+    if ((origin.scheme, origin.host, origin.port) != (b"http", b"127.0.0.1", 7897)
+            or pool._http1 is not True or pool._http2 is not False):
+        raise RuntimeError("heybox_tunnel_guard_proxy_mismatch")
+    existing = getattr(pool, "_feiyu_tunnel_guard_v1", None)
+    if existing is not None:
+        if pool.create_connection is not existing:
+            raise RuntimeError("heybox_tunnel_guard_changed")
+        return pool
+
+    original_factory = pool.create_connection
+    def guarded_factory(origin):
+        connection = original_factory(origin)
+        if type(connection) is not AsyncTunnelHTTPConnection:
+            return connection
+        original_handle = connection.handle_async_request
+        async def guarded_handle(request):
+            try:
+                return await original_handle(request)
+            except BaseException:
+                # The terminal request is dispatched only after _connected=True.
+                # A failed CONNECT/TLS tunnel belongs exclusively to this call.
+                if connection._connected is False and not connection.is_closed():
+                    try:
+                        with AsyncShieldCancellation():
+                            async with asyncio.timeout(1.0):
+                                await connection.aclose()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                raise
+        connection.handle_async_request = guarded_handle
+        return connection
+
+    pool.create_connection = guarded_factory
+    pool._feiyu_tunnel_guard_v1 = guarded_factory
+    return pool
+
+
+def _is_abandoned_heybox_tunnel(pool, connection):
+    """Conservatively identify a released CONNECT-only HTTP/1.1 tunnel."""
+    from anyio._backends._asyncio import SocketStream
+    from httpcore._async.connection import AsyncHTTPConnection
+    from httpcore._async.http11 import AsyncHTTP11Connection, HTTPConnectionState
+    from httpcore._async.http_proxy import AsyncTunnelHTTPConnection
+    from httpcore._backends.anyio import AnyIOStream
+
+    def unlocked(lock):
+        return (getattr(lock, "_backend", None) == "asyncio"
+                and hasattr(lock, "_anyio_lock")
+                and lock._anyio_lock.locked() is False)
+
+    if (type(connection) is not AsyncTunnelHTTPConnection
+            or connection._connected is not False
+            or any(request.connection is connection for request in pool._requests)
+            or not unlocked(connection._connect_lock)):
+        return False
+    proxy_connection = connection._connection
+    if type(proxy_connection) is not AsyncHTTPConnection or not unlocked(proxy_connection._request_lock):
+        return False
+    http11_connection = proxy_connection._connection
+    if (type(http11_connection) is not AsyncHTTP11Connection
+            or http11_connection._state is not HTTPConnectionState.ACTIVE
+            or not unlocked(http11_connection._state_lock)):
+        return False
+    network_stream = http11_connection._network_stream
+    if type(network_stream) is not AnyIOStream:
+        return False
+    socket_stream = network_stream._stream
+    return type(socket_stream) is SocketStream and getattr(socket_stream, "_closed", None) is True
+
+
+async def _close_abandoned_heybox_tunnels(pool):
+    """Close only rechecked, unassigned failed CONNECT tunnels; never replay."""
+    from httpcore._synchronization import AsyncShieldCancellation
+    for connection in tuple(pool.connections):
+        # No await between this identity/state test and the close call.
+        if _is_abandoned_heybox_tunnel(pool, connection):
+            try:
+                with AsyncShieldCancellation():
+                    async with asyncio.timeout(1.0):
+                        await connection.aclose()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+
 def install_comment_compat(plugin):
     """Adapt native transport, comment groups and signing; restore on termination."""
     package = plugin.__class__.__module__.rsplit(".", 1)[0] + ".xiaoheihe"
@@ -106,21 +211,28 @@ def install_comment_compat(plugin):
     api_client = importlib.import_module(package + ".api_client")
     original_start = api_client.XiaoheiheApiClient.start
 
-    async def direct_start(client):
-        # This local account's API is reachable directly. An inherited desktop
-        # proxy must not control this directly reachable service's transport.
-        # Keep injected clients intact and retain native timeouts/cookie handling.
+    async def proxy_start(client):
+        # Pin only this adapter's owned client to the existing loopback proxy.
+        # Never close or switch a live transport: an unknown in-flight write
+        # must finish under its original client and remain protected.
         if client._owns_client and not client._closed:
             if not hasattr(client, "_feiyu_transport_lock"):
                 client._feiyu_transport_lock = asyncio.Lock()
             async with client._feiyu_transport_lock:
-                if not getattr(client, "_feiyu_direct_transport", False):
-                    if client._client is not None:
-                        await client._client.aclose()
+                mode = getattr(client, "_feiyu_transport_mode", None)
+                old_direct = getattr(client, "_feiyu_direct_transport", False)
+                if mode == "existing_loopback_proxy_v1":
+                    if (client._client is None or old_direct
+                            or getattr(client._client, "is_closed", False) is True):
+                        raise RuntimeError("heybox_transport_requires_controlled_rebuild")
+                else:
+                    if mode is not None or old_direct or client._client is not None:
+                        raise RuntimeError("heybox_transport_requires_controlled_rebuild")
                     client._client = httpx.AsyncClient(
                         base_url=client._base_url,
                         timeout=client._timeout,
                         trust_env=False,
+                        proxy="http://127.0.0.1:7897",
                         follow_redirects=False,
                         limits=httpx.Limits(
                             max_connections=10,
@@ -132,10 +244,12 @@ def install_comment_compat(plugin):
                             "User-Agent": "AstrBot-Xiaoheihe-Adapter/1.1.3",
                         },
                     )
-                    client._feiyu_direct_transport = True
+                    client._feiyu_transport_mode = "existing_loopback_proxy_v1"
+                pool = _guard_heybox_proxy_transport(client._client)
+                await _close_abandoned_heybox_tunnels(pool)
         await original_start(client)
 
-    api_client.XiaoheiheApiClient.start = direct_start
+    api_client.XiaoheiheApiClient.start = proxy_start
     original_parse = api_client.parse_thread_context
 
     def parse_thread(payload, post_id):
@@ -188,7 +302,7 @@ def install_comment_compat(plugin):
     )
 
     def restore():
-        if api_client.XiaoheiheApiClient.start is direct_start:
+        if api_client.XiaoheiheApiClient.start is proxy_start:
             api_client.XiaoheiheApiClient.start = original_start
         if signing.RequestSigner.sign is sign:
             signing.RequestSigner.sign = original

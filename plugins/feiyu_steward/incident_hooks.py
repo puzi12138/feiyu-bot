@@ -10,6 +10,7 @@ already dispatched network operation cannot be recalled.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import functools
 import inspect
 import json
@@ -217,17 +218,85 @@ def _category(error):
     return "unexpected_exception"
 
 
-def _retry_exception_kind(error):
-    """Accept only real transport classes; no error text/category grants a trial."""
-    chain, current = [], error
-    while isinstance(current, BaseException) and all(current is not item for item in chain) and len(chain) < 8:
-        chain.append(current)
-        current = current.__cause__ or current.__context__
-    if any(isinstance(item, ssl.SSLError) for item in chain):
+def _retry_exception_graph(error):
+    """Collect bounded cause and context branches; ambiguity fails closed."""
+    if not isinstance(error, BaseException):
         return None
+    result, visited, active = [], set(), set()
+    group_class = getattr(builtins, "BaseExceptionGroup", None)
+
+    def visit(item):
+        identity = id(item)
+        if identity in active:
+            return False
+        if identity in visited:
+            return True
+        if (not isinstance(item, BaseException) or len(result) >= 32
+                or isinstance(group_class, type) and isinstance(item, group_class)):
+            return False
+        visited.add(identity)
+        active.add(identity)
+        result.append(item)
+        for child in (item.__cause__, item.__context__):
+            if child is not None and not visit(child):
+                return False
+        active.remove(identity)
+        return True
+
+    try:
+        return result if visit(error) else None
+    except Exception:
+        return None
+
+
+def _retry_tls_eof(error, graph):
+    """Accept only the audited AnyIO EOF mapping on the real connect path."""
+    openai = sys.modules.get("openai")
+    httpx = sys.modules.get("httpx")
+    httpcore = sys.modules.get("httpcore")
+    anyio = sys.modules.get("anyio")
+    api_cls = getattr(openai, "APIConnectionError", None)
+    http_cls = getattr(httpx, "ConnectError", None)
+    core_cls = getattr(httpcore, "ConnectError", None)
+    end_cls = getattr(anyio, "EndOfStream", None)
+    if (not all(isinstance(cls, type) for cls in (http_cls, core_cls, end_cls))
+            or not (type(error) is http_cls or isinstance(api_cls, type) and type(error) is api_cls)):
+        return None
+    http_error = error.__cause__ if type(error) is api_cls else error
+    core_error = getattr(http_error, "__cause__", None)
+    end = getattr(core_error, "__cause__", None)
+    if (type(core_error) is core_cls and end is None
+            and core_error.__suppress_context__ is True):
+        # Some real httpcore exception mappings preserve the AnyIO error only
+        # as a suppressed context. Never choose context over an explicit cause.
+        end = core_error.__context__
+    eof = getattr(end, "__context__", None)
+    if (type(http_error) is http_cls and type(core_error) is core_cls and type(end) is end_cls
+            and end.__cause__ is None and end.__suppress_context__ is True
+            and type(eof) is ssl.SSLEOFError and all(any(item is target for item in graph)
+                for target in (http_error, core_error, end, eof))):
+        return eof
+    return None
+
+
+def _retry_exception_classification(error):
+    """Return the existing eligibility and a content-free diagnostic reason."""
+    chain = _retry_exception_graph(error)
+    if chain is None:
+        return None, "vision_retry_graph_unavailable"
+    allowed_eof = _retry_tls_eof(error, chain)
+    rejected_ssl = [item for item in chain if isinstance(item, ssl.SSLError) and item is not allowed_eof]
+    if rejected_ssl:
+        if any(isinstance(item, ssl.SSLCertVerificationError) for item in rejected_ssl):
+            reason = "vision_retry_tls_certificate_present"
+        elif any(isinstance(item, ssl.SSLEOFError) for item in rejected_ssl):
+            reason = "vision_retry_tls_eof_unmatched"
+        else:
+            reason = "vision_retry_tls_other"
+        return None, reason
     if any(isinstance(item, PermissionError) or _heybox_api_category(item) in {
             "credential_invalid", "forbidden", "rate_limited", "send_unknown"} for item in chain):
-        return None
+        return None, "vision_retry_protected_exception"
     for module_name, names in (
         ("openai", ("AuthenticationError", "PermissionDeniedError", "RateLimitError", "APIStatusError")),
         ("httpx", ("HTTPStatusError",)),
@@ -235,24 +304,37 @@ def _retry_exception_kind(error):
         module = sys.modules.get(module_name)
         if any(isinstance(cls, type) and isinstance(item, cls)
                for item in chain for cls in (getattr(module, name, None) for name in names)):
-            return None
+            return None, "vision_retry_http_status"
+    target = error
+    security = sys.modules.get("data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.security")
+    cls = getattr(security, "ImageHostResolutionError", None)
+    if isinstance(cls, type):
+        while isinstance(target, cls):
+            # Use the original primary exception edge; the graph traversal
+            # order is not an exception-precedence contract.
+            target = target.__cause__ or target.__context__
+            if not isinstance(target, BaseException):
+                return None, "vision_retry_image_host_missing_cause"
     for kind, checks in (
         ("timeout", (("openai", "APITimeoutError"), ("httpx", "TimeoutException"))),
         ("connection", (("openai", "APIConnectionError"), ("httpx", "ConnectError"))),
     ):
         for module_name, name in checks:
             cls = getattr(sys.modules.get(module_name), name, None)
-            if isinstance(cls, type) and isinstance(error, cls):
-                return kind
-    if isinstance(error, TimeoutError):
-        return "timeout"
-    if isinstance(error, ConnectionResetError):
-        return "connection"
-    security = sys.modules.get("data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.security")
-    cls = getattr(security, "ImageHostResolutionError", None)
-    if isinstance(cls, type) and isinstance(error, cls) and len(chain) > 1:
-        return _retry_exception_kind(chain[1])
-    return None
+            if isinstance(cls, type) and isinstance(target, cls):
+                reason = ("vision_retry_tls_eof_connection" if kind == "connection" and allowed_eof is not None
+                          else "vision_retry_" + kind)
+                return kind, reason
+    if isinstance(target, TimeoutError):
+        return "timeout", "vision_retry_timeout"
+    if isinstance(target, ConnectionResetError):
+        return "connection", "vision_retry_connection"
+    return None, "vision_retry_unclassified"
+
+
+def _retry_exception_kind(error):
+    """Accept only real transport classes; diagnostic reasons grant nothing."""
+    return _retry_exception_classification(error)[0]
 
 
 @asynccontextmanager
@@ -642,13 +724,67 @@ class IncidentHooks:
                            and rows[0]["confirmed_at"] >= rows[0]["attempted_at"] >= grant["notification"].observed_at)
         await self._retry_finish_grant(grant, "success" if success else "unknown")
 
-    async def _retry_report_failure(self, runtime, event_id, route, feature, category, stage, kind):
+    def _record_retry_decision(self, feature, detail, gate):
+        """Best effort fixed metadata, never authority or exception content."""
+        if (feature not in {"heybox_comment", "heybox_vision"}
+                or detail not in {"tls_eof", "connection", "timeout", "other"}
+                or gate not in {"runtime_unavailable", "trial_failed", "duplicate", "not_available",
+                                "terminal_unverified", "disallowed", "report_unavailable", "ready_unconfirmed",
+                                "wake_requested", "wake_unavailable"}):
+            return
+        try:
+            record_failure(getattr(self.host, "root", None), feature, "heybox_retry_decision",
+                           reason="retry_" + detail + "_" + gate)
+        except Exception:
+            pass
+
+    def _record_heybox_send_failure(self, error):
+        """Best-effort metadata only; never changes delivery or retry authority."""
+        try:
+            record_failure(getattr(self.host, "root", None), "heybox_comment", "heybox_send", error=error)
+        except Exception:
+            pass
+
+    def _record_heybox_image_dns(self, runtime, error):
+        """Keep only fixed metadata for the real adapter resolver exception."""
+        try:
+            module_name = runtime.__class__.__module__.rsplit(".", 1)[0] + ".security"
+            security = sys.modules.get(module_name)
+            cls = getattr(security, "ImageHostResolutionError", None)
+            if (isinstance(cls, type) and cls.__module__ == module_name
+                    and isinstance(error, cls)):
+                record_failure(getattr(self.host, "root", None), "heybox_vision", "heybox_image_dns", error=error)
+        except Exception:
+            pass
+
+    def _record_heybox_main_failure(self, stage, error):
+        """Persist fixed classifier metadata only; this never grants a retry."""
+        if stage not in {"heybox_main_capture", "heybox_main_model"}:
+            return
+        try:
+            if not isinstance(error, BaseException):
+                reason = "main_retry_context_missing"
+            else:
+                _, classification = _retry_exception_classification(error)
+                reason = ("main_retry_" + classification[len("vision_retry_"):]
+                          if type(classification) is str and classification.startswith("vision_retry_")
+                          else "main_retry_classification_unavailable")
+            record_failure(getattr(self.host, "root", None), "heybox_comment", stage,
+                           error=error, reason=reason)
+        except Exception:
+            pass
+
+    async def _retry_report_failure(self, runtime, event_id, route, feature, category, stage, kind, *, detail=None):
+        detail = detail if detail in {"tls_eof", "connection", "timeout"} else (
+            kind if kind in {"connection", "timeout"} else "other")
         if runtime is None:
             await self._report(feature, category, stage)
+            self._record_retry_decision(feature, detail, "runtime_unavailable")
             return False
         grant = self._retry_claims.get((id(runtime), event_id))
         if grant is not None and grant.get("trial") is not None:
             await self._retry_finish_grant(grant, "failed")
+            self._record_retry_decision(feature, detail, "trial_failed")
             return True
         # A real post is one failure even if two wrappers/events observe it.
         # Reserve this process-local report slot before any terminal-state await;
@@ -662,6 +798,7 @@ class IncidentHooks:
             if kind not in {"connection", "timeout"}:
                 prior["hard"] = True
                 self._local_blocked.add("heybox_comment")
+            self._record_retry_decision(feature, detail, "duplicate")
             return False
         post_report = {"hard": kind not in {"connection", "timeout"}}
         reports[post_key] = post_report
@@ -672,6 +809,7 @@ class IncidentHooks:
             await block(runtime.repository, event_id, "new_content_processing_failed")
         terminal = await self._retry_terminal(runtime, event_id, route)
         if identity in self._retry_reported:
+            self._record_retry_decision(feature, detail, "duplicate")
             return False
         self._retry_reported.add(identity)
         retry = ({"scope": "heybox", "failed_key": str(route.post_id), "failure_kind": kind}
@@ -680,12 +818,19 @@ class IncidentHooks:
         result = await self._report(feature, category, stage, retry=retry)
         incident_id = result.get("incident_id") if isinstance(result, dict) else None
         if post_report["hard"]:
+            self._record_retry_decision(feature, detail, "disallowed")
             return False
         if retry is not None and type(incident_id) is str:
             ready = self.host.incidents.retry_ready(incident_id, str(route.post_id), verified_terminal=True) is True
             if ready:
-                self._signal_retry_wake(runtime, route.profile_id, incident_id)
+                wake = self._signal_retry_wake(runtime, route.profile_id, incident_id)
+                self._record_retry_decision(feature, detail, "wake_requested" if wake else "wake_unavailable")
+            else:
+                self._record_retry_decision(feature, detail, "ready_unconfirmed")
             return ready
+        gate = ("not_available" if not self._retry_available else
+                "terminal_unverified" if not terminal else "report_unavailable")
+        self._record_retry_decision(feature, detail, gate)
         return False
 
     def _signal_retry_wake(self, runtime, profile_id, incident_id):
@@ -787,6 +932,7 @@ class IncidentHooks:
                 try:
                     yield True
                 except Exception as error:
+                    self._record_heybox_image_dns(runtime, error)
                     if grant.get("trial") is not None:
                         await self._retry_finish_grant(grant, "failed")
                         return
@@ -867,6 +1013,171 @@ class IncidentHooks:
                 _AUTOMATIC_FEED_SCOPE.reset(scope_token)
         return wrapped
 
+    def _notice_poll_pool_state(self, pool):
+        """Snapshot known httpcore proxy internals only; never change or close anything.
+
+        This is an instantaneous count, not proof a connection is orphaned. Unknown
+        types and streams remain unknown; origin, request contents and IDs are omitted.
+        """
+        try:
+            proxy_mod = sys.modules.get("httpcore._async.http_proxy")
+            pool_mod = sys.modules.get("httpcore._async.connection_pool")
+            conn_mod = sys.modules.get("httpcore._async.connection")
+            h11_mod = sys.modules.get("httpcore._async.http11")
+            tunnel_cls = getattr(proxy_mod, "AsyncTunnelHTTPConnection", None)
+            request_cls = getattr(pool_mod, "AsyncPoolRequest", None)
+            conn_cls = getattr(conn_mod, "AsyncHTTPConnection", None)
+            h11_cls = getattr(h11_mod, "AsyncHTTP11Connection", None)
+            state_cls = getattr(h11_mod, "HTTPConnectionState", None)
+            if not all(isinstance(x, type) for x in (tunnel_cls, request_cls, conn_cls, h11_cls, state_cls)):
+                return None
+            values = vars(pool)
+            connections, requests, limit = (values.get("_connections"), values.get("_requests"),
+                                             values.get("_max_connections"))
+            if (type(connections) is not list or type(requests) is not list or type(limit) is not int
+                    or not 1 <= limit <= 4096 or len(connections) > 4096 or len(requests) > 4096):
+                return None
+            connections, requests = tuple(connections), tuple(requests)
+            if any(type(item) is not request_cls or "connection" not in vars(item) for item in requests):
+                return None
+            assigned = {id(vars(item)["connection"]) for item in requests if vars(item)["connection"] is not None}
+            result = {"limit": limit, "connections": len(connections), "requests": len(requests),
+                      "queued": sum(vars(item)["connection"] is None for item in requests),
+                      "unrecognized_connections": 0, "unconnected_unclassified": 0,
+                      "unconnected_active": 0, "unconnected_active_unassigned": 0,
+                      "unassigned_stream_closed": 0, "unassigned_stream_open": 0,
+                      "unassigned_stream_unknown": 0}
+            anyio_mod = sys.modules.get("httpcore._backends.anyio")
+            asyncio_mod = sys.modules.get("anyio._backends._asyncio")
+            stream_cls = getattr(anyio_mod, "AnyIOStream", None)
+            socket_cls = getattr(asyncio_mod, "SocketStream", None)
+            for tunnel in connections:
+                if type(tunnel) is not tunnel_cls:
+                    result["unrecognized_connections"] += 1
+                    continue
+                data = vars(tunnel)
+                connected = data.get("_connected")
+                if connected is True:
+                    continue
+                inner = data.get("_connection")
+                h11 = vars(inner).get("_connection") if type(inner) is conn_cls else None
+                if (connected is not False or type(h11) is not h11_cls
+                        or vars(h11).get("_state") is not state_cls.ACTIVE):
+                    result["unconnected_unclassified"] += 1
+                    continue
+                result["unconnected_active"] += 1
+                if id(tunnel) in assigned:
+                    continue
+                result["unconnected_active_unassigned"] += 1
+                stream = vars(h11).get("_network_stream")
+                socket = vars(stream).get("_stream") if isinstance(stream_cls, type) and type(stream) is stream_cls else None
+                closed = vars(socket).get("_closed") if isinstance(socket_cls, type) and type(socket) is socket_cls else None
+                key = "closed" if closed is True else "open" if closed is False else "unknown"
+                result["unassigned_stream_" + key] += 1
+            # The production event loop does not yield during this snapshot. If
+            # another thread changed either list, do not report a mixed sample.
+            now_connections, now_requests = values.get("_connections"), values.get("_requests")
+            if (type(now_connections) is not list or type(now_requests) is not list
+                    or len(now_connections) != len(connections) or len(now_requests) != len(requests)
+                    or any(a is not b for a, b in zip(now_connections, connections))
+                    or any(a is not b for a, b in zip(now_requests, requests))):
+                return None
+            return result
+        except Exception:
+            return None
+
+    def _notice_poll_client_state(self, service, initial_client, trace):
+        """Describe only already-existing objects; never create a client or request."""
+        state = {"service_registered": None, "client_present": False, "client_same_since_start": None,
+                 "runtime_client_same": None, "client_class_match": None, "owns_client": None,
+                 "httpx_class_match": None, "loopback_7897": None, "mode": "unavailable",
+                 "transport_kind": "unavailable", "poll_phase": "unknown"}
+        try:
+            phase = trace.get("phase") if type(trace) is dict else None
+            if phase in {"poll_once", "event_type"}:
+                state["poll_phase"] = phase
+            current = getattr(service, "client", None)
+            state["client_present"] = current is not None
+            if current is None:
+                return state
+            if initial_client is not None:
+                state["client_same_since_start"] = current is initial_client
+            _, runtime, services = _current_heybox(self)
+            state["service_registered"] = any(item is service for item in services)
+            profile = getattr(service, "profile_id", None)
+            clients = getattr(runtime, "_clients", None)
+            if type(profile) is str and type(clients) is dict:
+                state["runtime_client_same"] = clients.get((profile, False)) is current
+            api = sys.modules.get(_HEYBOX_API_MODULE)
+            cls = getattr(api, "XiaoheiheApiClient", None)
+            if not isinstance(cls, type):
+                return state
+            state["client_class_match"] = type(current) is cls
+            if not state["client_class_match"]:
+                return state
+            values = vars(current)
+            owns = values.get("_owns_client")
+            state["owns_client"] = owns if type(owns) is bool else None
+            mode, old = values.get("_feiyu_transport_mode"), values.get("_feiyu_direct_transport", False)
+            if mode == "existing_loopback_proxy_v1" and old is False:
+                state["mode"] = "proxy_marked"
+            elif mode is None and old is True:
+                state["mode"] = "direct_marked"
+            elif mode is None and old is False:
+                state["mode"] = "unmarked"
+            else:
+                state["mode"] = "other"
+            http = values.get("_client")
+            httpx = sys.modules.get("httpx")
+            httpcore = sys.modules.get("httpcore")
+            http_cls = getattr(httpx, "AsyncClient", None)
+            if not isinstance(http_cls, type) or http is None:
+                return state
+            state["httpx_class_match"] = type(http) is http_cls
+            if not state["httpx_class_match"]:
+                return state
+            raw = vars(http)
+            mounts = raw.get("_mounts")
+            pattern_cls = getattr(sys.modules.get("httpx._utils"), "URLPattern", None)
+            if type(mounts) is not dict or not isinstance(pattern_cls, type):
+                return state
+            if not mounts:
+                selected = raw.get("_transport")
+            elif len(mounts) == 1:
+                pattern, selected = next(iter(mounts.items()))
+                if type(pattern) is not pattern_cls or vars(pattern).get("pattern") != "all://":
+                    return state
+                if selected is None:
+                    selected = raw.get("_transport")
+            else:
+                return state
+            transport_cls = getattr(httpx, "AsyncHTTPTransport", None)
+            if not isinstance(transport_cls, type) or type(selected) is not transport_cls:
+                state["transport_kind"] = "other"
+                return state
+            pool = vars(selected).get("_pool")
+            proxy_cls = getattr(httpcore, "AsyncHTTPProxy", None)
+            direct_cls = getattr(httpcore, "AsyncConnectionPool", None)
+            if isinstance(proxy_cls, type) and type(pool) is proxy_cls:
+                state["transport_kind"] = "proxy"
+                snapshot = self._notice_poll_pool_state(pool)
+                if snapshot is not None:
+                    state["pool"] = snapshot
+                proxy_url = vars(pool).get("_proxy_url")
+                url_cls = getattr(httpcore, "URL", None)
+                if isinstance(url_cls, type) and type(proxy_url) is url_cls:
+                    url = vars(proxy_url)
+                    state["loopback_7897"] = (url.get("scheme") == b"http" and url.get("host") == b"127.0.0.1"
+                                               and url.get("port") == 7897)
+            elif isinstance(direct_cls, type) and type(pool) is direct_cls and vars(pool).get("_proxy") is None:
+                state["transport_kind"] = "direct"
+                state["loopback_7897"] = False
+            else:
+                state["transport_kind"] = "other"
+        except Exception:
+            pass
+        return state
+
     def _notice_poll(self, original):
         service = getattr(original, "__self__", None)
         @functools.wraps(original, updated=())
@@ -876,6 +1187,10 @@ class IncidentHooks:
             try:
                 if not notice_service_ready(service, "poll"):
                     raise _request_not_authorized()
+                try:
+                    initial_client = getattr(service, "client", None)
+                except Exception:
+                    initial_client = None
                 trace = {"phase": "poll_once", "event_type": "unknown"}
                 trace_token = _NOTICE_POLL_TRACE.set(trace)
                 try:
@@ -883,7 +1198,9 @@ class IncidentHooks:
                 except Exception as error:
                     category = _category(error)
                     if category is not None:
-                        record_failure(getattr(self.host, "root", None), "heybox_comment", "notice_poll", error=error)
+                        client_state = self._notice_poll_client_state(service, initial_client, trace)
+                        record_failure(getattr(self.host, "root", None), "heybox_comment", "notice_poll",
+                                       error=error, poll_client=client_state)
                     await self._report("heybox_comment", category, "notice_poll")
                     if category is not None:
                         details = {"phase": trace["phase"], "event_type": trace["event_type"],
@@ -1108,13 +1425,13 @@ class IncidentHooks:
             if (group is not None and group["task"] is asyncio.current_task()
                     and purpose == "image" and _category(error) is not None):
                 group["failed"] = True
-                kind = _retry_exception_kind(error)
+                kind, decision = _retry_exception_classification(error)
                 if kind is None:
                     group["hard_failure"] = True
                 elif group.get("failure_kind") is None:
                     group["failure_kind"] = kind
                 record_failure(getattr(self.host, "root", None), "heybox_vision",
-                               "vision_provider", error=error)
+                               "vision_provider", error=error, reason=decision)
             return original(profile_id, purpose, provider_id, error, details=details)
         return wrapped
 
@@ -1201,9 +1518,14 @@ class IncidentHooks:
                     "heybox_main_model_failed:APITimeoutError": "model_timeout",
                     "heybox_main_model_failed:TimeoutException": "model_timeout",
                 }.get(error, "model_failed")
-                kind = _retry_exception_kind(_HEYBOX_MODEL_EXCEPTION.get())
+                error_object = _HEYBOX_MODEL_EXCEPTION.get()
+                self._record_heybox_main_failure("heybox_main_model", error_object)
+                kind = _retry_exception_kind(error_object)
+                graph = _retry_exception_graph(error_object)
+                detail = ("tls_eof" if kind == "connection" and graph is not None
+                          and _retry_tls_eof(error_object, graph) is not None else kind)
                 await self._retry_report_failure(runtime, event_id, route,
-                    "heybox_comment", category, "notice_event", kind)
+                    "heybox_comment", category, "notice_event", kind, detail=detail)
                 if self.host.incidents.blocked("heybox_comment") is True:
                     self._local_blocked.discard("heybox_comment")
             return result
@@ -1214,6 +1536,11 @@ class IncidentHooks:
         async def wrapped(checked, error):
             token = _HEYBOX_MODEL_EXCEPTION.set(error)
             try:
+                try:
+                    if callable(getattr(checked, "_failed", None)) and _category(error) is not None:
+                        self._record_heybox_main_failure("heybox_main_capture", error)
+                except Exception:
+                    pass
                 return await original(checked, error)
             finally:
                 _HEYBOX_MODEL_EXCEPTION.reset(token)
@@ -1561,6 +1888,7 @@ class IncidentHooks:
                     await self._retry_delivery_result(runtime, event_id, result)
                     return result
                 except Exception as error:
+                    self._record_heybox_send_failure(error)
                     grant = self._retry_claims.get((id(runtime), event_id))
                     if grant is not None and grant.get("trial") is not None:
                         await self._retry_finish_grant(grant, "unknown" if _heybox_api_category(error) == "send_unknown" else "failed")
