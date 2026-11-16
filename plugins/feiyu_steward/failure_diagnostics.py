@@ -59,7 +59,7 @@ _REASONS = frozenset({"", "other", "receipt_missing", "receipt_invalid", "notice
     for kind in ("tls_eof", "connection", "timeout", "other")
     for gate in ("runtime_unavailable", "trial_failed", "duplicate", "not_available",
                  "terminal_unverified", "disallowed", "report_unavailable", "ready_unconfirmed",
-                 "wake_requested", "wake_unavailable")
+                 "wake_requested", "wake_unavailable", "normal_interval")
 ) | frozenset("main_retry_" + suffix for suffix in (
     "graph_unavailable", "tls_certificate_present", "tls_eof_unmatched", "tls_other",
     "protected_exception", "http_status", "image_host_missing_cause", "tls_eof_connection",

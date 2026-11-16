@@ -90,7 +90,7 @@ def _retry_notice(row):
     """Fixed first notice for a narrowly eligible new-content trial."""
     return (
         f"主人，{FEATURES[row['feature']]}遇到问题：{CATEGORIES[row['category']]}。\n"
-        "我会先跳过这条，立即尝试另一条未处理过的新内容；"
+        "我会先跳过这条，按正常浏览间隔尝试另一条未处理过的新内容；"
         "如果没有合适内容、再次失败或结果无法确认，就暂停这项功能。旧任务不会自动重发。\n"
         f"功能：{row['feature']}\n故障编号：{row['id']}"
     )

@@ -730,7 +730,7 @@ class IncidentHooks:
                 or detail not in {"tls_eof", "connection", "timeout", "other"}
                 or gate not in {"runtime_unavailable", "trial_failed", "duplicate", "not_available",
                                 "terminal_unverified", "disallowed", "report_unavailable", "ready_unconfirmed",
-                                "wake_requested", "wake_unavailable"}):
+                                "wake_requested", "wake_unavailable", "normal_interval"}):
             return
         try:
             record_failure(getattr(self.host, "root", None), feature, "heybox_retry_decision",
@@ -823,8 +823,8 @@ class IncidentHooks:
         if retry is not None and type(incident_id) is str:
             ready = self.host.incidents.retry_ready(incident_id, str(route.post_id), verified_terminal=True) is True
             if ready:
-                wake = self._signal_retry_wake(runtime, route.profile_id, incident_id)
-                self._record_retry_decision(feature, detail, "wake_requested" if wake else "wake_unavailable")
+                # Preserve the one durable trial for the normal native feed cadence.
+                self._record_retry_decision(feature, detail, "normal_interval")
             else:
                 self._record_retry_decision(feature, detail, "ready_unconfirmed")
             return ready
@@ -2131,12 +2131,8 @@ class IncidentHooks:
                     report = await self._report("bili_journal", category, "bili_journal_once",
                                                 retry=retry if valid_retry else None)
                     if valid_retry and isinstance(report, dict) and type(report.get("incident_id")) is str:
-                        if self.host.incidents.retry_ready(report["incident_id"], retry["failed_key"], verified_terminal=True) is True:
-                            try:
-                                from .bili_immediate_retry import request_immediate
-                                request_immediate(self.host, self, report["incident_id"])
-                            except Exception:
-                                self._local_blocked.add("bili_journal")
+                        # Keep the trial ready for a genuinely new watch on the normal schedule.
+                        self.host.incidents.retry_ready(report["incident_id"], retry["failed_key"], verified_terminal=True)
                 elif status == "journal_unknown":
                     await self._report("bili_journal", "delivery_unknown", "bili_journal_once")
             return result
