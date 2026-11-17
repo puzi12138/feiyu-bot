@@ -1,0 +1,3524 @@
+{
+  "schema_version": 1,
+  "root": ".",
+  "created_at": "2026-11-13T18:46:59+08:00",
+  "mapping_sha256": "10063dc643acf4b90c6ae8e5627d34962851ef926cbd6f91fb1e942ce06fc73a",
+  "designs_sha256": "25b03681d71869fabe944a38f1ac18717bcedc0da9e8cf0ea44522de75c6a17f",
+  "source_policy": {
+    "canonical_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+    "archive_manifest": "heybox-193355677-20261030/manifest.json",
+    "archive_readme": "heybox-193355677-20261030/README.md",
+    "creator_license": "原作者及逐图许可待确认；沿用原归档来源记录，不推断获得转载/商用授权。",
+    "confirmation": "主代理2026-11-13已目视全部18原参考联系板并核对02/04原图；沿用用户本次角色列表、README、manifest及旧映射，未仅凭编号猜测。",
+    "proportions": "正常版沿用偶数长比例原参考，Q版沿用对应奇数短比例原参考（约4～5头身），不强制变成2头身。"
+  },
+  "characters": [
+    {
+      "id": "feiyu",
+      "name": "肥鱼",
+      "features": [
+        "蓝发",
+        "鲸鳍侧饰",
+        "蓝色鲸尾",
+        "原有面部特征与眼睛颜色"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "海风奶油",
+          "palette": "奶油白、海军蓝、浅海蓝",
+          "structure": "白色宽松麻花针织开衫，内穿海军蓝水手领上衣；浅海蓝高腰A字中裙，形成柔软宽松上身与清晰裙腰。",
+          "accessories": "贝壳小斜挎包；白短袜配蓝白帆布鞋；沿用鲸鳍侧饰。",
+          "adaptation": "后腰专门留鲸尾活动开口；蓝色鲸尾完整露出，不被裙摆替代。",
+          "pair_contract": "白麻花开衫、深蓝水手领、浅蓝A字中裙、贝壳包、白袜蓝白帆布鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "feiyu-casual-normal-265da5a875d23cf9",
+              "character_id": "feiyu",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T18:49:01+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/02.jpg",
+                  "sha256": "255702774ee4054840c95c38c47935e116a7a273aeec3c1d7170317b4f036ec8"
+                }
+              ],
+              "note": "单次提交；采用原生透明PNG。实际提示词和生成意图已保留。",
+              "paired_normal_sha256": null,
+              "sha256": "265da5a875d23cf96ce9c11adfa9bccb1ada0fa8c7c89a65b88acdd990ee5626",
+              "bytes": 2052159,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T18:49:01+08:00",
+              "reviewer": "主代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "身份、全身、服装、肢体、透明背景检查通过；Q版针织开衫、水手领、浅蓝裙、贝壳包与鞋袜一致。",
+              "path": "肥鱼/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "feiyu-casual-q-2d10932c04b1a80f",
+              "character_id": "feiyu",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T18:49:43+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "肥鱼/正常版/日常休闲装.png",
+                  "sha256": "265da5a875d23cf96ce9c11adfa9bccb1ada0fa8c7c89a65b88acdd990ee5626"
+                },
+                {
+                  "path": "heybox-193355677-20261030/01.jpg",
+                  "sha256": "fedec66fcf973f69365c32282f16aabf4e4a990d2652549eba7754758d5bdb80"
+                }
+              ],
+              "note": "单次提交；采用原生透明PNG。实际提示词和生成意图已保留。",
+              "paired_normal_sha256": "265da5a875d23cf96ce9c11adfa9bccb1ada0fa8c7c89a65b88acdd990ee5626",
+              "sha256": "2d10932c04b1a80fa5bd61fb3dfee3387af74deb5c8e44a20881e7adbae3e2d6",
+              "bytes": 1383079,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T18:49:43+08:00",
+              "reviewer": "主代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "身份、全身、服装、肢体、透明背景检查通过；Q版针织开衫、水手领、浅蓝裙、贝壳包与鞋袜一致。",
+              "path": "肥鱼/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "潮汐巡游",
+          "palette": "海蓝、雾白、珊瑚橙点缀",
+          "structure": "雾白短款无帽防风夹克，海蓝拼色内搭；深蓝收口工装短裤与轻便腿部护套。",
+          "accessories": "橙色拉链头、小型防水斜挎腰包；蓝白防滑徒步鞋，白色中筒运动袜；贝壳扣。",
+          "adaptation": "夹克和短裤后腰为鲸尾分段开口，尾部自由摆动；不用背包遮挡尾鳍。",
+          "pair_contract": "无帽白蓝短夹克、深蓝工装短裤、橙色拉链与腰包、蓝白徒步鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "feiyu-functional-normal-a66c689f8e4086c0",
+              "character_id": "feiyu",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T18:57:25+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "source_availability": "未收录的制作中间稿；保留散列供来源核对",
+                  "sha256": "7c3e793ea45bcb599a00e7a0cddef7c0c1b7a4fe6d50c494065d5e2fdb615b4b",
+                  "role": "局部编辑目标"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "a66c689f8e4086c0046e31728f1432d3f0d28fa870d42e07106c9756d805afb7",
+              "bytes": 1910066,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T18:57:57+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "局部清理三处误生字母后通过：身份和全身完整，白蓝夹克/深蓝工装短裤/橙拉链/腿部护套/徒步鞋对应设计，鲸尾清楚，透明背景有效。",
+              "path": "肥鱼/正常版/外出机能装.png",
+              "repair_round": 1,
+              "repair_reason": "只移除夹克胸口及两只袜子的三处误生Z字母，其余服装和角色保留。",
+              "identity_references_before_repair": [
+                {
+                  "path": "heybox-193355677-20261030/02.jpg",
+                  "sha256": "255702774ee4054840c95c38c47935e116a7a273aeec3c1d7170317b4f036ec8"
+                }
+              ]
+            },
+            "Q版": {
+              "id": "feiyu-functional-q-6a75f789331248e4",
+              "character_id": "feiyu",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T18:59:14+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "肥鱼/正常版/外出机能装.png",
+                  "sha256": "a66c689f8e4086c0046e31728f1432d3f0d28fa870d42e07106c9756d805afb7"
+                },
+                {
+                  "path": "heybox-193355677-20261030/01.jpg",
+                  "sha256": "fedec66fcf973f69365c32282f16aabf4e4a990d2652549eba7754758d5bdb80"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "a66c689f8e4086c0046e31728f1432d3f0d28fa870d42e07106c9756d805afb7",
+              "sha256": "6a75f789331248e48dd8e4092e09bad2abcd8615e5a50c644078119563b5e236",
+              "bytes": 1232366,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T18:59:59+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版重新绘制且服装一致：白蓝机能夹克、深蓝工装短裤、橙拉链、腰包、护套和鞋袜对应；鲸鳍鲸尾完整，无误生字母。",
+              "path": "肥鱼/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "蓝潮鲸歌",
+          "palette": "深海蓝、渐层青蓝、珍珠白",
+          "structure": "海洋幻想礼裙：白色短肩披与修身蓝色上衣，弧形不对称层叠裙，前短后长且不拖地；裙边如潮汐波纹。",
+          "accessories": "珍珠贝壳腰饰、细小水滴饰件；蓝色圆头礼鞋配白色薄短袜；鲸鳍侧饰保留。",
+          "adaptation": "裙背留柔软尾根开口，鲸尾在裙侧清晰独立；裙摆不画成第二条尾巴。",
+          "pair_contract": "珍珠肩披、蓝色波浪层叠前短后长裙、贝壳腰饰、蓝礼鞋白袜一致。",
+          "images": {
+            "正常版": {
+              "id": "feiyu-fantasy-normal-690e99874773c8ff",
+              "character_id": "feiyu",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:01:26+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/02.jpg",
+                  "sha256": "255702774ee4054840c95c38c47935e116a7a273aeec3c1d7170317b4f036ec8"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "690e99874773c8ff22e81d6e37ce29b7dce390ab554dc1846ead793e9f7d6027",
+              "bytes": 2239825,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:01:58+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "海洋礼装通过：珍珠短肩披、贝壳腰饰、波浪渐层前短后长裙、蓝礼鞋白袜；原有脸部蓝发鲸鳍与独立鲸尾保持，人物完整。",
+              "path": "肥鱼/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "feiyu-fantasy-q-2e57a8645f0dcc7d",
+              "character_id": "feiyu",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:03:48+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "肥鱼/正常版/幻想主题礼装.png",
+                  "sha256": "690e99874773c8ff22e81d6e37ce29b7dce390ab554dc1846ead793e9f7d6027"
+                },
+                {
+                  "path": "heybox-193355677-20261030/01.jpg",
+                  "sha256": "fedec66fcf973f69365c32282f16aabf4e4a990d2652549eba7754758d5bdb80"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "690e99874773c8ff22e81d6e37ce29b7dce390ab554dc1846ead793e9f7d6027",
+              "sha256": "2e57a8645f0dcc7d8fe1aa1b513c4b6b61ec6f3c91c4fde31c70ee85bdfc2dc0",
+              "bytes": 1594987,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:04:29+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版礼装与正常版一致：珍珠肩披、蓝色波浪层叠裙、贝壳腰饰、蓝礼鞋白袜均对应；脸部鲸鳍鲸尾完整，透明背景有效。",
+              "path": "肥鱼/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "肥鱼/原始参考/正常版.jpg",
+          "sha256": "255702774ee4054840c95c38c47935e116a7a273aeec3c1d7170317b4f036ec8",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/3cc3bdbe706aadf9030582cfafdd41a2.png",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 128912,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 750,
+          "height": 1344,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/02.jpg",
+          "original_filename": "02.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "肥鱼/原始参考/Q版.jpg",
+          "sha256": "fedec66fcf973f69365c32282f16aabf4e4a990d2652549eba7754758d5bdb80",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/ed547eb149263d1810f5f21e0c238af2.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 170532,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/01.jpg",
+          "original_filename": "01.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "肥鱼/设计对照/三套服装对照-v2.png",
+        "sha256": "1d8159e0da5f66f6f4483adb6a610db06bcfd304d91d38c600d139800cafc70f",
+        "bytes": 950102,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T19:09:55+08:00",
+        "inputs": [
+          "265da5a875d23cf96ce9c11adfa9bccb1ada0fa8c7c89a65b88acdd990ee5626",
+          "2d10932c04b1a80fa5bd61fb3dfee3387af74deb5c8e44a20881e7adbae3e2d6",
+          "a66c689f8e4086c0046e31728f1432d3f0d28fa870d42e07106c9756d805afb7",
+          "6a75f789331248e48dd8e4092e09bad2abcd8615e5a50c644078119563b5e236",
+          "690e99874773c8ff22e81d6e37ce29b7dce390ab554dc1846ead793e9f7d6027",
+          "2e57a8645f0dcc7d8fe1aa1b513c4b6b61ec6f3c91c4fde31c70ee85bdfc2dc0"
+        ]
+      },
+      "comparison_history": [
+        {
+          "path": "肥鱼/设计对照/三套服装对照.png",
+          "sha256": "69150fc6f4e5f5728a8b94190bda8e9abbb3c1228f8b14c941059139fa9d3903",
+          "bytes": 956977,
+          "format": "PNG",
+          "mode": "RGB",
+          "width": 2400,
+          "height": 1500,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "kind": "composite_from_accepted",
+          "created_at": "2026-11-13T19:04:33+08:00",
+          "inputs": [
+            "265da5a875d23cf96ce9c11adfa9bccb1ada0fa8c7c89a65b88acdd990ee5626",
+            "2d10932c04b1a80fa5bd61fb3dfee3387af74deb5c8e44a20881e7adbae3e2d6",
+            "a66c689f8e4086c0046e31728f1432d3f0d28fa870d42e07106c9756d805afb7",
+            "6a75f789331248e48dd8e4092e09bad2abcd8615e5a50c644078119563b5e236",
+            "690e99874773c8ff22e81d6e37ce29b7dce390ab554dc1846ead793e9f7d6027",
+            "2e57a8645f0dcc7d8fe1aa1b513c4b6b61ec6f3c91c4fde31c70ee85bdfc2dc0"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gpt",
+      "name": "GPT龙娘",
+      "features": [
+        "银白长发",
+        "原参考龙角",
+        "淡紫色龙翼",
+        "龙尾",
+        "原有面部特征与眼睛颜色"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "紫藤书屋",
+          "palette": "淡紫、象牙白、深葡萄紫",
+          "structure": "象牙白灯笼袖衬衫，淡紫色高腰背带中长裙，双肩窄背带与深紫腰封，干净的纵向轮廓。",
+          "accessories": "银色小书形胸针、窄版手提书包；浅紫短袜配深紫玛丽珍鞋。",
+          "adaptation": "背带与后背布料避开翼根，龙翼在肩胛两侧自然展开；后裙有独立尾根开口。",
+          "pair_contract": "灯笼袖白衬衫、淡紫背带中长裙、深紫腰封、书形胸针、玛丽珍鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "gpt-casual-normal-e027ebc6f8224daf",
+              "character_id": "gpt",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T18:56:17+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/04.jpg",
+                  "sha256": "73ee645c1af6df3f1b2bff0dd0ccc8a7f5e57405f54ce51e9404564da763fe0b"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "e027ebc6f8224daf6149b6295399a074de03e051b27ef59ddf339eb526d00199",
+              "bytes": 1967244,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T18:57:04+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "银白长发淡紫眼、双角双翼及单尾正确；全身完整，白灯笼袖与紫背带中长裙/深紫腰封/书形胸针/书包/玛丽珍鞋一致；真实透明底，手部自然。",
+              "path": "GPT龙娘/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "gpt-casual-q-aeedb413baa35b84",
+              "character_id": "gpt",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T18:58:48+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "GPT龙娘/正常版/日常休闲装.png",
+                  "sha256": "e027ebc6f8224daf6149b6295399a074de03e051b27ef59ddf339eb526d00199"
+                },
+                {
+                  "path": "heybox-193355677-20261030/03.jpg",
+                  "sha256": "a9e749c566dff35aa268e1b4ebdc15048853b66761d3def066c8ccba59174429"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "e027ebc6f8224daf6149b6295399a074de03e051b27ef59ddf339eb526d00199",
+              "sha256": "aeedb413baa35b8403767c564cd36aee63fcb9cefdab8bdf6cc8e506b7e8e663",
+              "bytes": 1525175,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T18:58:48+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版比例独立重绘，银发淡紫眼及角翼尾完整；背带、灯笼袖、双扣腰封、裙边紫藤纹、书形饰物、书包及袜鞋与正常版相符；全身与双手自然，透明底。",
+              "path": "GPT龙娘/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "银翼远行",
+          "palette": "石墨黑、灰白、紫罗兰",
+          "structure": "灰白短款飞行背心配黑色合身长袖内搭；紫罗兰侧袋七分工装裤，分段腰带，利落探险轮廓。",
+          "accessories": "胸前银色小龙纹扣、腿侧地图袋；黑紫轻型系带靴，灰短袜。",
+          "adaptation": "飞行背心分体后片绕开翼根，后腰分叉避开尾根；不添加第二对翅膀。",
+          "pair_contract": "灰白短背心、黑内搭、紫侧袋七分裤、地图袋与黑紫靴一致。",
+          "images": {
+            "正常版": {
+              "id": "gpt-functional-normal-40c009e3a83f55b2",
+              "character_id": "gpt",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:00:18+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/04.jpg",
+                  "sha256": "73ee645c1af6df3f1b2bff0dd0ccc8a7f5e57405f54ce51e9404564da763fe0b"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "40c009e3a83f55b25421cde318513096fd2c75d87ee6c26900d51f26fd522223",
+              "bytes": 2066182,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:00:19+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "正常比例、银白发淡紫眼与双角双翼单尾完整；灰白飞行背心、黑长袖、紫七分工装裤、地图袋、灰袜黑紫靴符合设计；翼根和尾根关系自然，全身无裁切。",
+              "path": "GPT龙娘/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "gpt-functional-q-dcb071fe8db810cf",
+              "character_id": "gpt",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:02:38+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "GPT龙娘/正常版/外出机能装.png",
+                  "sha256": "40c009e3a83f55b25421cde318513096fd2c75d87ee6c26900d51f26fd522223"
+                },
+                {
+                  "path": "heybox-193355677-20261030/03.jpg",
+                  "sha256": "a9e749c566dff35aa268e1b4ebdc15048853b66761d3def066c8ccba59174429"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "40c009e3a83f55b25421cde318513096fd2c75d87ee6c26900d51f26fd522223",
+              "sha256": "dcb071fe8db810cfc84f93312f93eb961e41ff1b49a7884c6901c09af95c9e1c",
+              "bytes": 1457442,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:02:39+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版银白发淡紫眼、双角双翼单尾保留；灰白短背心、黑长袖、双侧裤袋与地图袋、分段腰带、灰袜和黑紫系带靴与正常版一致。全身可见，角尖靠近上边界但无明显缺失；透明底。",
+              "path": "GPT龙娘/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "龙晶星冕",
+          "palette": "月白、深紫、银色",
+          "structure": "龙族魔法礼装：月白立领长裙，深紫开襟束腰上衣；前裙整齐及踝，后侧两片悬垂布带形成羽翼般的仪式轮廓。",
+          "accessories": "银色龙晶腰饰、两侧细链、紫色宝石腕饰；银白礼靴；头饰只绕原有龙角布置。",
+          "adaptation": "露翼根后背结构，龙翼独立且淡紫半透明；尾巴由后腰开口伸出，不与垂布相连。",
+          "pair_contract": "月白立领长裙、深紫束腰开襟上衣、银龙晶腰饰、两侧垂布、银白礼靴一致。",
+          "images": {
+            "正常版": {
+              "id": "gpt-fantasy-normal-103bc42ce58abdf8",
+              "character_id": "gpt",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:04:27+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/04.jpg",
+                  "sha256": "73ee645c1af6df3f1b2bff0dd0ccc8a7f5e57405f54ce51e9404564da763fe0b"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "103bc42ce58abdf8b160df1e5e912adeade404ac823ff2778cdd3d4fe44aae3a",
+              "bytes": 2244291,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:04:28+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "银白长发淡紫眼及角翼尾保持；月白立领长裙、深紫开襟束腰、银色龙晶腰饰与链条、两侧垂布、银白礼靴清楚完整；翼、尾、布片互不混淆，透明底。",
+              "path": "GPT龙娘/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "gpt-fantasy-q-fe051d9f2bc59967",
+              "character_id": "gpt",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:06:29+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "GPT龙娘/正常版/幻想主题礼装.png",
+                  "sha256": "103bc42ce58abdf8b160df1e5e912adeade404ac823ff2778cdd3d4fe44aae3a"
+                },
+                {
+                  "path": "heybox-193355677-20261030/03.jpg",
+                  "sha256": "a9e749c566dff35aa268e1b4ebdc15048853b66761d3def066c8ccba59174429"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "103bc42ce58abdf8b160df1e5e912adeade404ac823ff2778cdd3d4fe44aae3a",
+              "sha256": "fe051d9f2bc599679cedb8137142ee67c5900793bbfa3f0a2c41086d6d2c0caa",
+              "bytes": 1669516,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:07:51+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版身份、角翼尾、全身完整；月白长裙、深紫束腰与侧垂布、银晶腰饰、双角宝石饰、腕饰及银白靴与正常版对应；白底合成确认真实alpha边缘干净，非背景噪点。",
+              "path": "GPT龙娘/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "GPT龙娘/原始参考/正常版.jpg",
+          "sha256": "73ee645c1af6df3f1b2bff0dd0ccc8a7f5e57405f54ce51e9404564da763fe0b",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/4fda58dc9f5192a993e42f378c2a52cd.png",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 430516,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/04.jpg",
+          "original_filename": "04.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "GPT龙娘/原始参考/Q版.jpg",
+          "sha256": "a9e749c566dff35aa268e1b4ebdc15048853b66761d3def066c8ccba59174429",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/37dbad5f72109d456b10ea3cbcb0fc51.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 240174,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/03.jpg",
+          "original_filename": "03.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "GPT龙娘/设计对照/三套服装对照-v2.png",
+        "sha256": "a16576b0ca4779ee4c7bbfeb7b635189c268c4029c2907fad65ea806136c60f4",
+        "bytes": 970003,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T19:10:58+08:00",
+        "inputs": [
+          "e027ebc6f8224daf6149b6295399a074de03e051b27ef59ddf339eb526d00199",
+          "aeedb413baa35b8403767c564cd36aee63fcb9cefdab8bdf6cc8e506b7e8e663",
+          "40c009e3a83f55b25421cde318513096fd2c75d87ee6c26900d51f26fd522223",
+          "dcb071fe8db810cfc84f93312f93eb961e41ff1b49a7884c6901c09af95c9e1c",
+          "103bc42ce58abdf8b160df1e5e912adeade404ac823ff2778cdd3d4fe44aae3a",
+          "fe051d9f2bc599679cedb8137142ee67c5900793bbfa3f0a2c41086d6d2c0caa"
+        ]
+      },
+      "comparison_history": [
+        {
+          "path": "GPT龙娘/设计对照/三套服装对照.png",
+          "sha256": "4a123686be1f3011333f2475a48fdf1d0cf4e2a7cbf1b0802a6ca0475614c0bb",
+          "bytes": 976177,
+          "format": "PNG",
+          "mode": "RGB",
+          "width": 2400,
+          "height": 1500,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "kind": "composite_from_accepted",
+          "created_at": "2026-11-13T19:07:54+08:00",
+          "inputs": [
+            "e027ebc6f8224daf6149b6295399a074de03e051b27ef59ddf339eb526d00199",
+            "aeedb413baa35b8403767c564cd36aee63fcb9cefdab8bdf6cc8e506b7e8e663",
+            "40c009e3a83f55b25421cde318513096fd2c75d87ee6c26900d51f26fd522223",
+            "dcb071fe8db810cfc84f93312f93eb961e41ff1b49a7884c6901c09af95c9e1c",
+            "103bc42ce58abdf8b160df1e5e912adeade404ac823ff2778cdd3d4fe44aae3a",
+            "fe051d9f2bc599679cedb8137142ee67c5900793bbfa3f0a2c41086d6d2c0caa"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "claude",
+      "name": "Claude",
+      "features": [
+        "橙色长发",
+        "原有花饰",
+        "原有面部特征与眼睛颜色"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "橘花午后",
+          "palette": "暖米白、鼠尾草绿、杏橙",
+          "structure": "米白小圆领短袖衬衫配鼠尾草绿交叠背心，杏橙色高腰阔腿九分裤；圆润上装与轻盈裤装搭配。",
+          "accessories": "沿用原有花饰、花形纽扣、藤编小手提篮；棕色便鞋配米白短袜。",
+          "adaptation": "保留橙色长发长度与原花饰位置，服装不用新帽遮蔽头部。",
+          "pair_contract": "白圆领衬衫、绿交叠背心、杏橙阔腿裤、藤编篮与棕便鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "claude-casual-normal-c1fa39438927ef96",
+              "character_id": "claude",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:09:51+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/06.jpg",
+                  "sha256": "57353cb00658160b1c99173028eed97f4bbcbcaa373965271d2425543d6bcde0"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "c1fa39438927ef962f21c0b7a1ed24bab8fbdfd229aed84b1b47648396b2cae9",
+              "bytes": 2006620,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:09:52+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "橙长发琥珀眼、原花饰与深缎带保持；米白圆领衬衫、绿交叠背心、杏橙阔腿裤、藤编篮和棕鞋米白袜清晰；双手提篮自然，全身完整，透明底。",
+              "path": "Claude/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "claude-casual-q-c1dd15b43d0943f2",
+              "character_id": "claude",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:12:00+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Claude/正常版/日常休闲装.png",
+                  "sha256": "c1fa39438927ef962f21c0b7a1ed24bab8fbdfd229aed84b1b47648396b2cae9"
+                },
+                {
+                  "path": "heybox-193355677-20261030/05.jpg",
+                  "sha256": "b8ec01ad3e29ba18e2a3ce67039d1285502fa1a4fba9db30db1430a04e44eee7"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "c1fa39438927ef962f21c0b7a1ed24bab8fbdfd229aed84b1b47648396b2cae9",
+              "sha256": "c1dd15b43d0943f29ce1001925d07b52ed0bb049c6e38a7fdf289c448d7d033c",
+              "bytes": 1298189,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:12:01+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版橙长发、琥珀眼和原花饰缎带保持，绿交叠背心/白圆领衬衫/杏橙阔腿裤/花形扣/藤篮/米白袜棕鞋与正常版一一对应；全身自然，透明底。",
+              "path": "Claude/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "野花采风",
+          "palette": "橄榄绿、奶油黄、焦糖棕",
+          "structure": "奶油黄高领轻针织内搭，橄榄绿多口袋短风衣；棕色膝上A字工装裙配打底裤。",
+          "accessories": "花叶胸针、小型帆布双肩包、原有发花；焦糖色低筒徒步靴与厚短袜。",
+          "adaptation": "背包肩带与长发前后关系明确，双手自然，花饰无遮挡。",
+          "pair_contract": "黄高领内搭、绿多袋短风衣、棕A字工装裙和深打底裤、棕徒步靴一致。",
+          "images": {
+            "正常版": {
+              "id": "claude-functional-normal-324d9e22d645365a",
+              "character_id": "claude",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:16:18+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/06.jpg",
+                  "sha256": "57353cb00658160b1c99173028eed97f4bbcbcaa373965271d2425543d6bcde0"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "324d9e22d645365a8e8f413ce0947f19e4f2546de9e795be878e35fd042316ee",
+              "bytes": 1915052,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:16:19+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "橙发琥珀眼与花饰保持；奶油黄高领内搭、绿多口袋短风衣、棕工装裙与深打底裤、帆布背包、厚袜棕徒步靴符合设计，野花采风配件自然；无严重穿模或裁切，透明底。",
+              "path": "Claude/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "claude-functional-q-44aa1a234c1a1138",
+              "character_id": "claude",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:17:58+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Claude/正常版/外出机能装.png",
+                  "sha256": "324d9e22d645365a8e8f413ce0947f19e4f2546de9e795be878e35fd042316ee"
+                },
+                {
+                  "path": "heybox-193355677-20261030/05.jpg",
+                  "sha256": "b8ec01ad3e29ba18e2a3ce67039d1285502fa1a4fba9db30db1430a04e44eee7"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "324d9e22d645365a8e8f413ce0947f19e4f2546de9e795be878e35fd042316ee",
+              "sha256": "44aa1a234c1a1138e0a619e77f9ce3c71df8de315df00766df8a371d10b79aca",
+              "bytes": 1513308,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:17:59+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版橙发与花饰身份一致；奶油高领、绿色多袋外套、棕裙和深打底裤、花叶胸针、采风花束/帆布包、厚袜棕靴均与正常版对应；完整全身、手部自然、真实透明底。",
+              "path": "Claude/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "琥珀花庭",
+          "palette": "琥珀橙、奶油白、青叶绿",
+          "structure": "花庭礼裙：奶油白方领泡泡短袖上衣，琥珀色收腰钟形及踝裙，外层花瓣状分片裙与内层浅色褶边。",
+          "accessories": "绿叶腰带、橙白花簇胸饰、原有发花；米白交叉带礼鞋与奶油白短袜。",
+          "adaptation": "长发与花瓣裙保持独立轮廓；不将身体改成植物或添加非原有种族结构。",
+          "pair_contract": "方领泡袖白上衣、琥珀钟形花瓣分片裙、绿叶腰带、花簇胸饰与白礼鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "claude-fantasy-normal-bea780b277dd2c87",
+              "character_id": "claude",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:20:53+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/06.jpg",
+                  "sha256": "57353cb00658160b1c99173028eed97f4bbcbcaa373965271d2425543d6bcde0"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "bea780b277dd2c872d54b3726a430983e2e866c2a5aac627901ce50174c34d59",
+              "bytes": 2476807,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:20:54+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "橙长发琥珀眼与原发花缎带保持；奶白方领泡袖、琥珀花瓣层叠长裙、绿叶腰带、橙白花簇、奶白袜交叉带鞋符合设计；原书配件保留为礼装配饰，手与裙摆自然完整，透明底。",
+              "path": "Claude/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "claude-fantasy-q-a77836123dfba39f",
+              "character_id": "claude",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:24:18+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Claude/正常版/幻想主题礼装.png",
+                  "sha256": "bea780b277dd2c872d54b3726a430983e2e866c2a5aac627901ce50174c34d59"
+                },
+                {
+                  "path": "heybox-193355677-20261030/05.jpg",
+                  "sha256": "b8ec01ad3e29ba18e2a3ce67039d1285502fa1a4fba9db30db1430a04e44eee7"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "bea780b277dd2c872d54b3726a430983e2e866c2a5aac627901ce50174c34d59",
+              "sha256": "a77836123dfba39f9f55988c9c20b794efb5f57c1edae506df9bab011e067aa0",
+              "bytes": 1633308,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:24:19+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "橙发琥珀眼花饰身份一致；Q版花瓣层叠裙、方领泡袖、绿叶腰带、花簇、书、交叉带鞋与奶白袜对应正常版；完整全身，无额外种族结构，透明底。",
+              "path": "Claude/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "Claude/原始参考/正常版.jpg",
+          "sha256": "57353cb00658160b1c99173028eed97f4bbcbcaa373965271d2425543d6bcde0",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/84fbd8b128d5311b0e25080ff374f0b6.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 482574,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/06.jpg",
+          "original_filename": "06.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "Claude/原始参考/Q版.jpg",
+          "sha256": "b8ec01ad3e29ba18e2a3ce67039d1285502fa1a4fba9db30db1430a04e44eee7",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/13dd7d0dd0ab737c0ad283ad48522541.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 264559,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/05.jpg",
+          "original_filename": "05.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "Claude/设计对照/三套服装对照-v2.png",
+        "sha256": "a891adef894899a1bee7f677a10f9713b10113fe4d205b02d6cacccbb228050a",
+        "bytes": 947306,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T19:24:23+08:00",
+        "inputs": [
+          "c1fa39438927ef962f21c0b7a1ed24bab8fbdfd229aed84b1b47648396b2cae9",
+          "c1dd15b43d0943f29ce1001925d07b52ed0bb049c6e38a7fdf289c448d7d033c",
+          "324d9e22d645365a8e8f413ce0947f19e4f2546de9e795be878e35fd042316ee",
+          "44aa1a234c1a1138e0a619e77f9ce3c71df8de315df00766df8a371d10b79aca",
+          "bea780b277dd2c872d54b3726a430983e2e866c2a5aac627901ce50174c34d59",
+          "a77836123dfba39f9f55988c9c20b794efb5f57c1edae506df9bab011e067aa0"
+        ]
+      }
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini",
+      "features": [
+        "蓝紫色头发",
+        "猫耳",
+        "原参考左右异色眼",
+        "星形装饰"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "星点街角",
+          "palette": "靛蓝、雾紫、冰白",
+          "structure": "雾紫短款宽袖棒球外套，冰白圆领上衣；靛蓝侧开衩百褶短裙，轻松街头轮廓。",
+          "accessories": "原有星形发饰、星形拉链头、迷你星星斜挎袋；左右同款白中筒袜和紫白厚底运动鞋。",
+          "adaptation": "猫耳完整露出，不加盖耳帽；严格保留原参考左右异色眼对应关系。",
+          "pair_contract": "雾紫棒球外套、白圆领内搭、靛蓝百褶裙、星包、白中袜与紫白运动鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "gemini-casual-normal-6a5904ba2991ad9c",
+              "character_id": "gemini",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:27:25+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/08.jpg",
+                  "sha256": "ec21c5e31579db4e26375bdabba386aa30c631525fc8333c13b23bfb45288974"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "6a5904ba2991ad9c5ec3c1c7f3acde01a119be147e26b3a03f6de87e4dddf884",
+              "bytes": 1989650,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:27:26+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "蓝紫长发与紫梢、双猫耳单猫尾及星饰保持；观看者左眼粉紫右眼金黄正确。紫棒球外套/白内搭/靛蓝百褶裙/星包/白中袜紫白鞋符合设计，完整全身、透明底。",
+              "path": "Gemini/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "gemini-casual-q-8c6c08fd3a1fae70",
+              "character_id": "gemini",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:30:39+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Gemini/正常版/日常休闲装.png",
+                  "sha256": "6a5904ba2991ad9c5ec3c1c7f3acde01a119be147e26b3a03f6de87e4dddf884"
+                },
+                {
+                  "path": "heybox-193355677-20261030/07.jpg",
+                  "sha256": "020f563d82d93aec09923f4bef29a72059285350e65c85e4f1bd03c254244181"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "6a5904ba2991ad9c5ec3c1c7f3acde01a119be147e26b3a03f6de87e4dddf884",
+              "sha256": "8c6c08fd3a1fae70c40724f365af8d0200340b28550f1a01bc7a39163d3cb4ca",
+              "bytes": 1467017,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:30:39+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版蓝紫长发、双猫耳单尾、星饰正确，异色眼观看者左粉紫右金黄；棒球外套、白内搭、深百褶裙、星包、星链及白袜紫白鞋与正常版对应；完整全身、透明底。",
+              "path": "Gemini/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "极光跃迁",
+          "palette": "深靛蓝、荧光薄荷绿、银灰",
+          "structure": "银灰轻薄连帽斗篷式短雨披（帽子垂在背后），深靛蓝运动套装与贴袋束脚长裤；薄荷绿功能缝线。",
+          "accessories": "胸口星形扣、短款斜挎工具包、运动腕带；银灰防水跑鞋。",
+          "adaptation": "帽子始终放下，猫耳无遮挡不变形；避免雨披遮住所有蓝紫头发。",
+          "pair_contract": "灰短雨披、深蓝束脚长裤、薄荷功能线、星扣与灰防水跑鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "gemini-functional-normal-fd6a892d69563086",
+              "character_id": "gemini",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:34:53+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/08.jpg",
+                  "sha256": "ec21c5e31579db4e26375bdabba386aa30c631525fc8333c13b23bfb45288974"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "fd6a892d6956308646cc1a2ef21ca7bfb994209b98e5c8c114a6fb1a9747201c",
+              "bytes": 2194300,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:34:54+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "猫耳猫尾、蓝紫发与星饰完整，异色眼左粉紫右金黄保持；银灰短雨披/背后落帽、深蓝束脚裤、薄荷绿线、工具包与银灰鞋符合设计；功能服装连接合理，完整全身、透明底。",
+              "path": "Gemini/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "gemini-functional-q-edd40643e08e5b66",
+              "character_id": "gemini",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:38:01+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Gemini/正常版/外出机能装.png",
+                  "sha256": "fd6a892d6956308646cc1a2ef21ca7bfb994209b98e5c8c114a6fb1a9747201c"
+                },
+                {
+                  "path": "heybox-193355677-20261030/07.jpg",
+                  "sha256": "020f563d82d93aec09923f4bef29a72059285350e65c85e4f1bd03c254244181"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "fd6a892d6956308646cc1a2ef21ca7bfb994209b98e5c8c114a6fb1a9747201c",
+              "sha256": "edd40643e08e5b66685d7d9e24e9b276558ebdff504dc0636e8ef532c67fcebd",
+              "bytes": 1541214,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:38:02+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版猫耳猫尾和星饰保持，左右异色眼方向正确；银灰短雨披与背后落帽、深蓝束脚裤、薄荷线、工具包/裤袋、腕带及银灰跑鞋均对应正常版；完整全身、透明底。",
+              "path": "Gemini/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "双星夜幕",
+          "palette": "午夜蓝、淡紫、星银",
+          "structure": "星空魔法礼装：短肩披、深蓝无袖高领上衣与高腰不对称双层及膝裙；外层薄纱半裙呈轨道弧线，内层淡紫。",
+          "accessories": "双星腰链、星形胸扣、细银腕环；银紫绑带短靴和淡紫长袜；星饰沿用。",
+          "adaptation": "猫耳与异色眼清晰；弧线薄纱作为裙片而非新增身体尾巴。",
+          "pair_contract": "短肩披、高领深蓝上衣、淡紫内裙和星空轨道外纱、双星腰链、银紫靴一致。",
+          "images": {
+            "正常版": {
+              "id": "gemini-fantasy-normal-7a906be0a5997e71",
+              "character_id": "gemini",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:41:22+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/08.jpg",
+                  "sha256": "ec21c5e31579db4e26375bdabba386aa30c631525fc8333c13b23bfb45288974"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "7a906be0a5997e71249190947906579cdf679edb764e84026f8255515b9b0f79",
+              "bytes": 2264472,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:41:23+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "蓝紫发双猫耳单尾、星饰与左粉右金异色眼正确；短肩披、深蓝高领上衣、淡紫内裙与轨道外纱、双星腰链、银腕环、淡紫长袜及银紫绑带靴符合设计；全身与手部自然，透明底。",
+              "path": "Gemini/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "gemini-fantasy-q-67ae968a9ac0d7bb",
+              "character_id": "gemini",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:43:42+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Gemini/正常版/幻想主题礼装.png",
+                  "sha256": "7a906be0a5997e71249190947906579cdf679edb764e84026f8255515b9b0f79"
+                },
+                {
+                  "path": "heybox-193355677-20261030/07.jpg",
+                  "sha256": "020f563d82d93aec09923f4bef29a72059285350e65c85e4f1bd03c254244181"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "7a906be0a5997e71249190947906579cdf679edb764e84026f8255515b9b0f79",
+              "sha256": "67ae968a9ac0d7bb396273cb729e713952eb037d75106dc8857ff18991099cc6",
+              "bytes": 1563479,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1230,
+              "height": 1278,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:43:43+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版蓝紫发、双猫耳单尾与左粉右金异色眼正确；短肩披、深蓝高领、淡紫内裙、星空轨道外纱、双星腰链、银腕环、紫长袜银紫靴均对应正常版；完整全身，透明底。",
+              "path": "Gemini/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "Gemini/原始参考/正常版.jpg",
+          "sha256": "ec21c5e31579db4e26375bdabba386aa30c631525fc8333c13b23bfb45288974",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/fab81424a509fa6f7a2e29e8b75df6bb.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 377880,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/08.jpg",
+          "original_filename": "08.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "Gemini/原始参考/Q版.jpg",
+          "sha256": "020f563d82d93aec09923f4bef29a72059285350e65c85e4f1bd03c254244181",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/d8e5b5c6e1022d5e9f073c89c3bc39a5.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 237656,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/07.jpg",
+          "original_filename": "07.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "Gemini/设计对照/三套服装对照-v2.png",
+        "sha256": "9936252ef611a205f19a4a946fb0f9b7cdfaef14ceee43a7fd870b511649faf3",
+        "bytes": 1004407,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T19:43:47+08:00",
+        "inputs": [
+          "6a5904ba2991ad9c5ec3c1c7f3acde01a119be147e26b3a03f6de87e4dddf884",
+          "8c6c08fd3a1fae70c40724f365af8d0200340b28550f1a01bc7a39163d3cb4ca",
+          "fd6a892d6956308646cc1a2ef21ca7bfb994209b98e5c8c114a6fb1a9747201c",
+          "edd40643e08e5b66685d7d9e24e9b276558ebdff504dc0636e8ef532c67fcebd",
+          "7a906be0a5997e71249190947906579cdf679edb764e84026f8255515b9b0f79",
+          "67ae968a9ac0d7bb396273cb729e713952eb037d75106dc8857ff18991099cc6"
+        ]
+      }
+    },
+    {
+      "id": "glm",
+      "name": "GLM",
+      "features": [
+        "黑发",
+        "原有面部特征与眼睛颜色",
+        "Z形标志元素"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "墨线清晨",
+          "palette": "墨黑、暖白、浅灰",
+          "structure": "暖白卷袖衬衫，黑色无袖V领针织背心；浅灰高腰直筒长裤，简洁书卷式线条。",
+          "accessories": "小型Z形胸针、黑色手提帆布包；黑白乐福鞋与深灰短袜。",
+          "adaptation": "保留黑发原长度与面部特征，Z形元素为几何图案而非一段正文。",
+          "pair_contract": "白卷袖衬衫、黑V领针织背心、灰直筒裤、Z胸针与黑白乐福鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "glm-casual-normal-8239c4a123c7566a",
+              "character_id": "glm",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:12:30+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/10.jpg",
+                  "sha256": "dad7a36a38808402a2fd5f00b34706f395badb9e519199fc5ffa270f9c94dd9c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "8239c4a123c7566aeee642a96024ea057766994ed68c99d1b1d1ab29d0bd5d45",
+              "bytes": 1666511,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:13:23+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "黑长发、灰紫眼、原蕾丝发箍和Z元素准确；白卷袖衬衫黑V领背心灰长裤与黑白鞋形成完整新装；双手和全身完整，白底预览边缘干净、透明通道有效。",
+              "path": "GLM/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "glm-casual-q-eed5f5054b7c5666",
+              "character_id": "glm",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:14:43+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "GLM/正常版/日常休闲装.png",
+                  "sha256": "8239c4a123c7566aeee642a96024ea057766994ed68c99d1b1d1ab29d0bd5d45"
+                },
+                {
+                  "path": "heybox-193355677-20261030/09.jpg",
+                  "sha256": "93c8703db2de1945fd6db75133ca0d51002bf7b8ca79cca87d3a5df32c29632a"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "8239c4a123c7566aeee642a96024ea057766994ed68c99d1b1d1ab29d0bd5d45",
+              "sha256": "eed5f5054b7c56666292cb2c82c72cc46b3720e0a78c343db61d20bf070b4ce7",
+              "bytes": 1311183,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:14:44+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版黑长发灰紫眼和蕾丝Z发饰保持；白卷袖衬衫、黑V领背心、灰裤、黑包及黑白鞋袜逐项对应正常版；头身明显缩短而非缩图，完整双手双脚，透明背景可用。",
+              "path": "GLM/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "折线越野",
+          "palette": "炭灰、冰蓝、黑色",
+          "structure": "炭灰不对称拉链轻冲锋衣，冰蓝高领内搭；黑色分节工装长裤与可调节裤脚。",
+          "accessories": "Z形反光带、胸前扁平工具袋、腕部小导航配件；黑灰徒步短靴。",
+          "adaptation": "衣领不过分遮挡脸，保留黑发轮廓；功能带不与肢体穿插。",
+          "pair_contract": "斜拉链灰冲锋衣、冰蓝高领、黑分节工装裤、Z反光带、黑灰短靴一致。",
+          "images": {
+            "正常版": {
+              "id": "glm-functional-normal-26836f2efc034f1d",
+              "character_id": "glm",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:17:00+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/10.jpg",
+                  "sha256": "dad7a36a38808402a2fd5f00b34706f395badb9e519199fc5ffa270f9c94dd9c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "26836f2efc034f1dff72a057ccf2e22ced2c8885e8cdae3ce61b65e4c5598a35",
+              "bytes": 1831754,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:17:01+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "黑长发灰紫眼及原头饰Z标记保持；灰斜拉链冲锋衣、冰蓝高领、黑分节工装裤和徒步靴明确，胸袋反光带导航配件齐全；全身双脚未裁，肢体连接合理，原生透明。",
+              "path": "GLM/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "glm-functional-q-6c29990632f1b4e9",
+              "character_id": "glm",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:18:48+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "GLM/正常版/外出机能装.png",
+                  "sha256": "26836f2efc034f1dff72a057ccf2e22ced2c8885e8cdae3ce61b65e4c5598a35"
+                },
+                {
+                  "path": "heybox-193355677-20261030/09.jpg",
+                  "sha256": "93c8703db2de1945fd6db75133ca0d51002bf7b8ca79cca87d3a5df32c29632a"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "26836f2efc034f1dff72a057ccf2e22ced2c8885e8cdae3ce61b65e4c5598a35",
+              "sha256": "6c29990632f1b4e94b4ab2e355621c0ccdaf9dcd5c07a9ea8e91d3d51ef23563",
+              "bytes": 1252535,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:18:49+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "灰紫眼黑发原Z发饰身份一致，Q版短比例自然；灰斜拉链外套、冰蓝高领、工具袋、分节黑工装裤、反光带及鞋对应正常版；手脚清楚完整，无明显穿模，原生透明。",
+              "path": "GLM/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "玄墨几何",
+          "palette": "墨黑、玉白、冷银",
+          "structure": "几何幻想礼装：玉白小立领内衣、黑色剪裁长马甲式礼服，前短后长两片硬朗衣摆；内穿银灰窄脚长裤。",
+          "accessories": "银色Z形腰扣、袖口折线纹、玉白单肩短披片；黑银尖圆头礼靴。",
+          "adaptation": "保留原基础体型；披片是衣物且不变成翅膀；无需改变发型来适配礼装。",
+          "pair_contract": "黑剪裁长马甲、白立领、银灰窄裤、Z腰扣和单肩短披片、黑银靴一致。",
+          "images": {
+            "正常版": {
+              "id": "glm-fantasy-normal-2908b784ffb0e40e",
+              "character_id": "glm",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:21:02+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/10.jpg",
+                  "sha256": "dad7a36a38808402a2fd5f00b34706f395badb9e519199fc5ffa270f9c94dd9c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": null,
+              "sha256": "2908b784ffb0e40e24af80c282b0ddac1749ffdc5e34c6db779cc1b2b586be13",
+              "bytes": 1935451,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:21:03+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "身份黑长发灰紫眼、Z发饰准确；长马甲礼服前短后长、白立领单肩披片、银灰窄裤和黑银礼靴清楚；手持原身份书本作为可复用附件保留。全身完整且肢体自然，原生透明。",
+              "path": "GLM/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "glm-fantasy-q-7ae7507bc59e4d30",
+              "character_id": "glm",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:23:09+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "GLM/正常版/幻想主题礼装.png",
+                  "sha256": "2908b784ffb0e40e24af80c282b0ddac1749ffdc5e34c6db779cc1b2b586be13"
+                },
+                {
+                  "path": "heybox-193355677-20261030/09.jpg",
+                  "sha256": "93c8703db2de1945fd6db75133ca0d51002bf7b8ca79cca87d3a5df32c29632a"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。",
+              "paired_normal_sha256": "2908b784ffb0e40e24af80c282b0ddac1749ffdc5e34c6db779cc1b2b586be13",
+              "sha256": "7ae7507bc59e4d302e35901bbf532142ea192c791ef2c8b6243a21b897af0645",
+              "bytes": 1380241,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:23:10+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版大头短身符合原风格，黑发灰紫眼Z元素保留；长马甲前短后长、白立领单肩披片、银灰窄裤、Z腰扣礼靴及书本与正常版匹配；全身鞋子完整，透明背景和肢体结构通过。",
+              "path": "GLM/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "GLM/原始参考/正常版.jpg",
+          "sha256": "dad7a36a38808402a2fd5f00b34706f395badb9e519199fc5ffa270f9c94dd9c",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/4cef1eea5450df8a7e4944e40b543bde.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 360226,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/10.jpg",
+          "original_filename": "10.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "GLM/原始参考/Q版.jpg",
+          "sha256": "93c8703db2de1945fd6db75133ca0d51002bf7b8ca79cca87d3a5df32c29632a",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/2a0944423a47a42dfb6f5f94b323c1c6.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 201398,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/09.jpg",
+          "original_filename": "09.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "GLM/设计对照/三套服装对照-v2.png",
+        "sha256": "b8ffea551e2d08ec22d7aff8f94fceaa985fb24c66f1ac9c8068f7363c457647",
+        "bytes": 846544,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T19:23:13+08:00",
+        "inputs": [
+          "8239c4a123c7566aeee642a96024ea057766994ed68c99d1b1d1ab29d0bd5d45",
+          "eed5f5054b7c56666292cb2c82c72cc46b3720e0a78c343db61d20bf070b4ce7",
+          "26836f2efc034f1dff72a057ccf2e22ced2c8885e8cdae3ce61b65e4c5598a35",
+          "6c29990632f1b4e94b4ab2e355621c0ccdaf9dcd5c07a9ea8e91d3d51ef23563",
+          "2908b784ffb0e40e24af80c282b0ddac1749ffdc5e34c6db779cc1b2b586be13",
+          "7ae7507bc59e4d302e35901bbf532142ea192c791ef2c8b6243a21b897af0645"
+        ]
+      }
+    },
+    {
+      "id": "kimi",
+      "name": "Kimi",
+      "features": [
+        "白发",
+        "月亮与音乐装饰",
+        "棱镜元素",
+        "原有面部特征与眼睛颜色"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "月光唱片",
+          "palette": "云白、浅灰蓝、淡柠檬黄",
+          "structure": "浅灰蓝宽松针织套头衫，云白翻领露出；淡柠檬黄及膝箱褶裙，轻软学院音乐气质。",
+          "accessories": "沿用月亮音乐发饰、棱镜小吊坠、唱片形小肩包；白色系带皮鞋与灰蓝短袜。",
+          "adaptation": "保留白发与原月亮音乐装饰，不用巨大耳机覆盖原标志。",
+          "pair_contract": "灰蓝针织套头衫、白翻领、淡黄箱褶裙、棱镜吊坠与唱片包、白鞋灰蓝袜一致。",
+          "images": {
+            "正常版": {
+              "id": "kimi-casual-normal-6a3aca4a633867e9",
+              "character_id": "kimi",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:27:01+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/12.jpg",
+                  "sha256": "d65eac869cd5f22a4097bd68c108e4b96bf51484313f540cb461bd0203f17374"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "6a3aca4a633867e9c2e9b6d9dc60629910ac683da735d713e9688760cd8d87c3",
+              "bytes": 2047487,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:27:02+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "白色淡紫光泽长发与淡紫眼一致，月亮音乐头饰和手持/挂坠棱镜可见；灰蓝针织白领淡黄褶裙唱片包与白鞋灰蓝袜构成新装。全身清晰、双手合理、透明背景有效；头饰细金属件不作文字。",
+              "path": "Kimi/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "kimi-casual-q-057cba10cd06a41a",
+              "character_id": "kimi",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:29:45+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Kimi/正常版/日常休闲装.png",
+                  "sha256": "6a3aca4a633867e9c2e9b6d9dc60629910ac683da735d713e9688760cd8d87c3"
+                },
+                {
+                  "path": "heybox-193355677-20261030/11.jpg",
+                  "sha256": "3d27c9fbd85998883cb1456b22e4c68a5f4ea6a229c413631dfcf20475122ae2"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "6a3aca4a633867e9c2e9b6d9dc60629910ac683da735d713e9688760cd8d87c3",
+              "sha256": "057cba10cd06a41aa2b4d128ba100333cbb3b22ba7fb03f1b31f7b752a9ecd52",
+              "bytes": 1544721,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:30:34+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "白发淡紫眼和月亮音乐头饰、棱镜与正常版身份一致；灰蓝针织白领黄褶裙、唱片包、白鞋灰蓝袜一一对应。Q比例自然，双手双脚完整，白底预览无破损发丝裙边，原生透明。",
+              "path": "Kimi/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "棱镜漫游",
+          "palette": "雾白、雾青、紫蓝虹彩点缀",
+          "structure": "雾白短款防晒衬衫外套，雾青运动背心；深灰蓝膝上直筒旅行短裤，轻盈层次。",
+          "accessories": "棱镜扣小背包、月牙拉链头、便携音乐播放器腰袋；雾青白拼色登山鞋与白长袜。",
+          "adaptation": "音乐与月亮元素清晰但不额外变更面部耳部结构；白发独立于白外套。",
+          "pair_contract": "白短衬衫外套、雾青内搭、灰蓝旅行短裤、棱镜背包和月牙扣、青白鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "kimi-functional-normal-8e4497e77e37057e",
+              "character_id": "kimi",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:00:24+08:00",
+              "accepted_at": "2026-11-13T20:00:24+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Kimi/制作历史/外出机能装-背景修复前.png",
+                  "sha256": "f080e858aa2c78dd4448c44060386004bee443972c5d9bc7790db154b235b5a9",
+                  "archived_reference_path": "Kimi/制作历史/外出机能装-背景修复前.png"
+                }
+              ],
+              "paired_normal_sha256": null,
+              "reviewer": "主代理与独立审查复核",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "主代理及独立审查对白底真实alpha合成复核通过：灰斑已消除，完全透明外区61.87%、四角alpha0；白发紫眼、月牙音符棱镜、圆扣、白青外套、灰蓝短裤、背包播放器和青白鞋袜保留。与现有Q版服装主要结构和配件一致，Q版字节不变，重新配对通过。",
+              "note": "第二轮且最后一轮：仅修复背景，旧采用版本完整保留。",
+              "repair_round": 2,
+              "supersedes_sha256": "f080e858aa2c78dd4448c44060386004bee443972c5d9bc7790db154b235b5a9",
+              "sha256": "8e4497e77e37057ef9f3fbf34413952a3438343eb6c36ad7e3c68e5c658c2f1f",
+              "bytes": 1979268,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "path": "Kimi/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "kimi-functional-q-703605b1666d0da0",
+              "character_id": "kimi",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:39:45+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Kimi/制作历史/外出机能装-背景修复前.png",
+                  "sha256": "f080e858aa2c78dd4448c44060386004bee443972c5d9bc7790db154b235b5a9"
+                },
+                {
+                  "path": "heybox-193355677-20261030/11.jpg",
+                  "sha256": "3d27c9fbd85998883cb1456b22e4c68a5f4ea6a229c413631dfcf20475122ae2"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "8e4497e77e37057ef9f3fbf34413952a3438343eb6c36ad7e3c68e5c658c2f1f",
+              "sha256": "703605b1666d0da01d0d15ea8ad7de8d7e4df326f796c0e7360eba2e5c7dd07c",
+              "bytes": 1708230,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:39:46+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "白发紫眼、月牙音符棱镜清晰且无K字母；白短外套、青内搭、灰蓝短裤、背包播放器腰袋、长袜青白鞋与正常版一致；短比例完整全身，双手结构自然，透明有效。",
+              "path": "Kimi/Q版/外出机能装.png",
+              "paired_generation_normal_sha256": "f080e858aa2c78dd4448c44060386004bee443972c5d9bc7790db154b235b5a9",
+              "pair_revalidation_history": [
+                {
+                  "kind": "background_only_repair",
+                  "background_only": true,
+                  "old_normal_sha256": "f080e858aa2c78dd4448c44060386004bee443972c5d9bc7790db154b235b5a9",
+                  "new_normal_sha256": "8e4497e77e37057ef9f3fbf34413952a3438343eb6c36ad7e3c68e5c658c2f1f",
+                  "Q_sha256": "703605b1666d0da01d0d15ea8ad7de8d7e4df326f796c0e7360eba2e5c7dd07c",
+                  "old_normal_archive": "Kimi/制作历史/外出机能装-背景修复前.png",
+                  "reviewer": "主代理与独立审查复核",
+                  "reviewed_at": "2026-11-13T20:00:24+08:00",
+                  "note": "主代理及独立审查对白底真实alpha合成复核通过：灰斑已消除，完全透明外区61.87%、四角alpha0；白发紫眼、月牙音符棱镜、圆扣、白青外套、灰蓝短裤、背包播放器和青白鞋袜保留。与现有Q版服装主要结构和配件一致，Q版字节不变，重新配对通过。"
+                }
+              ]
+            }
+          },
+          "image_history": [
+            {
+              "id": "kimi-functional-normal-f080e858aa2c78dd",
+              "character_id": "kimi",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "superseded",
+              "recorded_at": "2026-11-13T19:37:29+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "source_availability": "未收录的制作中间稿；保留散列供来源核对",
+                  "sha256": "0d4f4ee5ddeef3bd052732e6ccacebef6d5226728e68aa1c25a1dc74f96e871c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "f080e858aa2c78dd4448c44060386004bee443972c5d9bc7790db154b235b5a9",
+              "bytes": 2323388,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 3,
+              "alpha_max": 253,
+              "accepted_at": "2026-11-13T19:37:30+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "局部修复已将K改为圆扣；白发紫眼、月牙音符和棱镜保留。白短外套青内搭灰蓝旅行短裤、背包播放器及青白鞋白袜明确，全身和双手结构通过，透明原图可用。",
+              "path": "Kimi/制作历史/外出机能装-背景修复前.png"
+            }
+          ]
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "月棱奏鸣",
+          "palette": "月白、冰蓝、柔和彩虹折光",
+          "structure": "月亮乐师礼装：冰蓝高腰短上衣配月白收褶长裙；单侧短斗篷像弯月，腰部透明棱镜片形成小型环状装饰。",
+          "accessories": "月牙胸针、音符链、棱镜腰饰；月白细带平底礼鞋及浅蓝薄短袜。",
+          "adaptation": "保留原白发与月亮音乐头饰；虹彩仅是材料反光，不给头发换色。",
+          "pair_contract": "冰蓝上衣、月白长褶裙、弯月单侧斗篷、棱镜腰饰、月白礼鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "kimi-fantasy-normal-138ed460db98ef65",
+              "character_id": "kimi",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:50:48+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/12.jpg",
+                  "sha256": "d65eac869cd5f22a4097bd68c108e4b96bf51484313f540cb461bd0203f17374"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "138ed460db98ef65d2fb23fefb4129fbafdf2ff96825bf1376276d7da3d0ddfa",
+              "bytes": 2210110,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:52:06+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "白发淡紫眼、月牙音符及圆扣保留，无K；冰蓝高腰上衣、月白长褶裙、单侧月牙短斗篷、棱镜腰饰和白礼鞋可见；两手自然全身完整；白底预览背景干净，alpha四角均0。",
+              "path": "Kimi/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "kimi-fantasy-q-9c624de42755009e",
+              "character_id": "kimi",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:57:46+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Kimi/正常版/幻想主题礼装.png",
+                  "sha256": "138ed460db98ef65d2fb23fefb4129fbafdf2ff96825bf1376276d7da3d0ddfa"
+                },
+                {
+                  "path": "heybox-193355677-20261030/11.jpg",
+                  "sha256": "3d27c9fbd85998883cb1456b22e4c68a5f4ea6a229c413631dfcf20475122ae2"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "138ed460db98ef65d2fb23fefb4129fbafdf2ff96825bf1376276d7da3d0ddfa",
+              "sha256": "9c624de42755009e9f0ae98a974d1065b29621d1dfbec8919b5fb92f721ce08a",
+              "bytes": 2274713,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:58:40+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "白发紫眼月牙音符圆扣和棱镜保持；冰蓝上衣、月白褶裙、单侧月亮短斗篷、棱镜腰圈音符链及白礼鞋浅蓝袜与正常版对应。Q比例自然全身清楚；白底边缘完整、四角alpha0。",
+              "path": "Kimi/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "Kimi/原始参考/正常版.jpg",
+          "sha256": "d65eac869cd5f22a4097bd68c108e4b96bf51484313f540cb461bd0203f17374",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/2946d87860cc5f6bb3fd11996a020ed2.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 448669,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/12.jpg",
+          "original_filename": "12.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "Kimi/原始参考/Q版.jpg",
+          "sha256": "3d27c9fbd85998883cb1456b22e4c68a5f4ea6a229c413631dfcf20475122ae2",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/1504151eed6d5e75abd8124b36e91d39.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 236941,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/11.jpg",
+          "original_filename": "11.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "Kimi/设计对照/三套服装对照-v2.png",
+        "sha256": "5242438e6e91eefef0a2479c4b1529a9e1e6a756b389a24e9dca5de833365054",
+        "bytes": 986561,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T20:00:51+08:00",
+        "inputs": [
+          "6a3aca4a633867e9c2e9b6d9dc60629910ac683da735d713e9688760cd8d87c3",
+          "057cba10cd06a41aa2b4d128ba100333cbb3b22ba7fb03f1b31f7b752a9ecd52",
+          "8e4497e77e37057ef9f3fbf34413952a3438343eb6c36ad7e3c68e5c658c2f1f",
+          "703605b1666d0da01d0d15ea8ad7de8d7e4df326f796c0e7360eba2e5c7dd07c",
+          "138ed460db98ef65d2fb23fefb4129fbafdf2ff96825bf1376276d7da3d0ddfa",
+          "9c624de42755009e9f0ae98a974d1065b29621d1dfbec8919b5fb92f721ce08a"
+        ]
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "千问",
+      "features": [
+        "蓝色辫子及原有编发结构",
+        "原有面部特征与眼睛颜色",
+        "折扇元素"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "竹影茶时",
+          "palette": "浅竹绿、月白、雾蓝",
+          "structure": "月白小立领盘扣短衬衫，浅竹绿宽松短开衫；雾蓝八分阔腿裤，东方细节与日常便装结合。",
+          "accessories": "折扇挂于细腰带，竹节扣小布包；月白浅口布鞋与浅蓝短袜。",
+          "adaptation": "蓝色辫子原编发结构和长度保持，折扇不长成额外手指。",
+          "pair_contract": "白盘扣衬衫、绿短开衫、蓝阔腿裤、腰挂折扇、白布鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "qwen-casual-normal-e0d6209c89fd4570",
+              "character_id": "qwen",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:01:31+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/16.jpg",
+                  "sha256": "501ffb20bf148d70a58bac7d5f8590e07639c8945fe72e31df809eb627d3b085"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "e0d6209c89fd4570184a5cd4f5d1950c6359df04b55470b240ab096a187be950",
+              "bytes": 2008550,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:02:22+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "蓝色长辫与蓝紫眼、蓝白小帽发饰和展开折扇清楚；白盘扣衬衫绿开衫蓝八分阔腿裤、腰挂扇饰竹扣布包白鞋浅蓝袜符合新设计。两手自然完整全身，白底透明检查干净，四角alpha0。",
+              "path": "千问/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "qwen-casual-q-adc0dc493640736e",
+              "character_id": "qwen",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:04:40+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "千问/正常版/日常休闲装.png",
+                  "sha256": "e0d6209c89fd4570184a5cd4f5d1950c6359df04b55470b240ab096a187be950"
+                },
+                {
+                  "path": "heybox-193355677-20261030/15.jpg",
+                  "sha256": "f57dbfeac6d10f45999a0522dfb46ce67b277af1e7e1733a9d25f8cc9be34bb8"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "e0d6209c89fd4570184a5cd4f5d1950c6359df04b55470b240ab096a187be950",
+              "sha256": "adc0dc493640736ef544849507af1b479ebaa53322599c2be2c17383d3e31993",
+              "bytes": 1374670,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:05:43+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "蓝辫蓝紫眼原蓝白发饰及折扇身份明确；白盘扣绿开衫蓝阔腿裤、竹扣包、腰扇饰与白鞋蓝袜完整对应正常版，Q短比例自然。肢体完整，白底边缘干净且四角alpha0。",
+              "path": "千问/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "云山行旅",
+          "palette": "藏蓝、岩灰、朱红点缀",
+          "structure": "岩灰窄袖短款斜襟外套，藏蓝交叠领内搭；藏蓝束脚旅行长裤，朱红窄腰带。",
+          "accessories": "带折扇的细长腰侧扇套、小型卷口背包；灰蓝轻靴配藏蓝短袜。",
+          "adaptation": "蓝色辫子避开背包肩带，扇套与手腕分开；保持双手结构自然。",
+          "pair_contract": "灰斜襟短外套、藏蓝交领与束脚裤、红窄腰带、扇套和灰蓝轻靴一致。",
+          "images": {
+            "正常版": {
+              "id": "qwen-functional-normal-dd9640d34d89160b",
+              "character_id": "qwen",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:08:54+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/16.jpg",
+                  "sha256": "501ffb20bf148d70a58bac7d5f8590e07639c8945fe72e31df809eb627d3b085"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "dd9640d34d89160ba03c47249e731de5914aa7caf367dcf8405d0b67c96b5fac",
+              "bytes": 1808482,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:09:29+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "蓝辫蓝紫眼蓝白发饰与折扇保持，灰斜襟短外套藏蓝交领束脚裤红腰带和灰蓝靴明确；背包与辫子分离、扇套连接自然，两手完整。白底检查干净，四角alpha0。",
+              "path": "千问/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "qwen-functional-q-b1b847d882df855b",
+              "character_id": "qwen",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:11:55+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "千问/正常版/外出机能装.png",
+                  "sha256": "dd9640d34d89160ba03c47249e731de5914aa7caf367dcf8405d0b67c96b5fac"
+                },
+                {
+                  "path": "heybox-193355677-20261030/15.jpg",
+                  "sha256": "f57dbfeac6d10f45999a0522dfb46ce67b277af1e7e1733a9d25f8cc9be34bb8"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "dd9640d34d89160ba03c47249e731de5914aa7caf367dcf8405d0b67c96b5fac",
+              "sha256": "b1b847d882df855b0ce67ad5becd1c8d75f07e3e4cedf52540ec03c0b7a07601",
+              "bytes": 1385641,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:12:56+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "蓝辫蓝紫眼折扇身份清楚；灰斜襟外套藏蓝交领束脚裤红腰带、扇套卷包和灰蓝靴对应正常版。头饰与鞋均完整、手部自然、Q比例明确；白底无灰斑且四角alpha0。",
+              "path": "千问/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "青瓷流云",
+          "palette": "青瓷蓝、玉白、淡金",
+          "structure": "东方幻想礼装：玉白交领窄袖上衣，青瓷蓝高腰长裙；两片水纹披帛垂在身侧，裙摆轻薄分层。",
+          "accessories": "淡金云纹腰饰、与原形象协调的折扇、细小珠穗；青瓷蓝绣花平底鞋与白袜。",
+          "adaptation": "蓝辫仍完整可见；披帛不穿手臂，折扇与原手部正确连接，五官不改。",
+          "pair_contract": "白交领窄袖、青瓷蓝长裙、双侧水纹披帛、金云纹腰饰、折扇与蓝布鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "qwen-fantasy-normal-4837860753f6fe75",
+              "character_id": "qwen",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:18:48+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/16.jpg",
+                  "sha256": "501ffb20bf148d70a58bac7d5f8590e07639c8945fe72e31df809eb627d3b085"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "4837860753f6fe75766b1d0b2fececf0bf34e7556d3def5a4e44d92729b8402b",
+              "bytes": 2228937,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:19:34+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "蓝辫蓝紫眼蓝白发饰与折扇完整；白交领窄袖、青瓷蓝高腰分层长裙、两侧水纹披帛、淡金云腰饰与蓝礼鞋白袜明确。披帛不穿臂，两手自然全身未裁；白底干净、四角alpha0。",
+              "path": "千问/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "qwen-fantasy-q-88cd94795bc333dd",
+              "character_id": "qwen",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:22:38+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "千问/正常版/幻想主题礼装.png",
+                  "sha256": "4837860753f6fe75766b1d0b2fececf0bf34e7556d3def5a4e44d92729b8402b"
+                },
+                {
+                  "path": "heybox-193355677-20261030/15.jpg",
+                  "sha256": "f57dbfeac6d10f45999a0522dfb46ce67b277af1e7e1733a9d25f8cc9be34bb8"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "4837860753f6fe75766b1d0b2fececf0bf34e7556d3def5a4e44d92729b8402b",
+              "sha256": "88cd94795bc333dd16da9f16670b64fa529de68bd0f11fd0ba681b379b577485",
+              "bytes": 1574600,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:23:56+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "蓝色辫子蓝紫眼、原小帽发饰和折扇保留；白交领窄袖青瓷蓝层裙双侧水纹披帛金腰饰、蓝鞋白袜均对应正常版。Q比例自然，手足完整无明显穿模，白底干净且四角alpha0。",
+              "path": "千问/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "千问/原始参考/正常版.jpg",
+          "sha256": "501ffb20bf148d70a58bac7d5f8590e07639c8945fe72e31df809eb627d3b085",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/622cf7e2b48e6900127e8f60a5b0a406.png",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 404230,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/16.jpg",
+          "original_filename": "16.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "千问/原始参考/Q版.jpg",
+          "sha256": "f57dbfeac6d10f45999a0522dfb46ce67b277af1e7e1733a9d25f8cc9be34bb8",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/6fab67d4966522abd714ddee29d13222.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 229792,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/15.jpg",
+          "original_filename": "15.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "千问/设计对照/三套服装对照-v2.png",
+        "sha256": "2041fd458f482ef39bb92b284edaffe14cef41e81d47976b1d8bd5615fe70fdd",
+        "bytes": 873566,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T20:24:01+08:00",
+        "inputs": [
+          "e0d6209c89fd4570184a5cd4f5d1950c6359df04b55470b240ab096a187be950",
+          "adc0dc493640736ef544849507af1b479ebaa53322599c2be2c17383d3e31993",
+          "dd9640d34d89160ba03c47249e731de5914aa7caf367dcf8405d0b67c96b5fac",
+          "b1b847d882df855b0ce67ad5becd1c8d75f07e3e4cedf52540ec03c0b7a07601",
+          "4837860753f6fe75766b1d0b2fececf0bf34e7556d3def5a4e44d92729b8402b",
+          "88cd94795bc333dd16da9f16670b64fa529de68bd0f11fd0ba681b379b577485"
+        ]
+      }
+    },
+    {
+      "id": "grok",
+      "name": "Grok",
+      "features": [
+        "金色双马尾",
+        "原有面部特征与眼睛颜色",
+        "原有基础体型"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "柠檬快拍",
+          "palette": "柠檬黄、牛仔蓝、黑白",
+          "structure": "白色短袖宽松T恤，柠檬黄单肩短围巾；蓝色背带短裤，黑色窄腰带，活泼日常廓形。",
+          "accessories": "小相机斜挎包、黑白棋盘小发带（不替代双马尾）；黑白低帮板鞋与白中筒袜。",
+          "adaptation": "金色双马尾完整露出且保留原绑发位置；服装不改变基础体型。",
+          "pair_contract": "白T、黄短围巾、牛仔背带短裤、相机包、黑白板鞋白袜一致。",
+          "images": {
+            "正常版": {
+              "id": "grok-casual-normal-c566b2eb4388f560",
+              "character_id": "grok",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:48:55+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/18.jpg",
+                  "sha256": "122764c0a23ce9df86c36850267cfd6f63549c03f794bfa094018f856a6c884a"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "c566b2eb4388f56069ef97c07573ff6d77776dcdc43e33b2a83cd9492f8f5cc9",
+              "bytes": 1983466,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:48:56+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "金色双马尾蓝眼、原尖耳黑发结与俏皮面部保持；白T黄短围巾、牛仔背带短裤黑腰带、相机包、棋盘发带、白中袜黑白板鞋符合设计；双手自然全身完整，透明底。",
+              "path": "Grok/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "grok-casual-q-a5bb6bcdee441807",
+              "character_id": "grok",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:51:36+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Grok/正常版/日常休闲装.png",
+                  "sha256": "c566b2eb4388f56069ef97c07573ff6d77776dcdc43e33b2a83cd9492f8f5cc9"
+                },
+                {
+                  "path": "heybox-193355677-20261030/17.jpg",
+                  "sha256": "2ac022280712241cf0e99ef214e16ba90435adfe9b202fbbc2f1477a0597139c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "c566b2eb4388f56069ef97c07573ff6d77776dcdc43e33b2a83cd9492f8f5cc9",
+              "sha256": "a5bb6bcdee441807c346a955326cb7ac1f0b204387df3faa6e702a7ee1805b21",
+              "bytes": 1688926,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:51:37+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版金色双马尾蓝眼尖耳黑结保持；白T与黄围巾、牛仔背带短裤黑腰带、相机包、棋盘发带和黑白板鞋白袜同正常版一致；手部与完整全身自然，透明底。",
+              "path": "Grok/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "霓光疾行",
+          "palette": "电紫、黑色、亮黄",
+          "structure": "黑色轻量骑行短外套，电紫贴身运动内搭；黑色膝上机能裙裤，亮黄边线与双侧拉链袋。",
+          "accessories": "窄幅腰包、亮黄护腕；紫黑高帮运动鞋与白短袜。",
+          "adaptation": "双马尾在肩后自然分离，领口不给头发错误连接；裙裤明确为同一套两种比例。",
+          "pair_contract": "黑骑行短外套、紫内搭、黑机能裙裤、黄边与护腕、紫黑高帮鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "grok-functional-normal-415192930d0be792",
+              "character_id": "grok",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:54:18+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/18.jpg",
+                  "sha256": "122764c0a23ce9df86c36850267cfd6f63549c03f794bfa094018f856a6c884a"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "415192930d0be7922332226cb9dc875997756ef4156baf6b4ec7abc1db45ee1f",
+              "bytes": 1900206,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T19:54:19+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "金双马尾、蓝眼尖耳与原黑色蝙蝠结状发饰保持；黑骑行短外套、紫内搭、黑黄机能裙裤、窄腰包、黄护腕与紫黑高帮鞋白袜对应设计；无新增身体翅膀尾巴，完整全身透明底。",
+              "path": "Grok/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "grok-functional-q-dcc6bfbc556b56b9",
+              "character_id": "grok",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T19:58:25+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Grok/正常版/外出机能装.png",
+                  "sha256": "415192930d0be7922332226cb9dc875997756ef4156baf6b4ec7abc1db45ee1f"
+                },
+                {
+                  "path": "heybox-193355677-20261030/17.jpg",
+                  "sha256": "2ac022280712241cf0e99ef214e16ba90435adfe9b202fbbc2f1477a0597139c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "415192930d0be7922332226cb9dc875997756ef4156baf6b4ec7abc1db45ee1f",
+              "sha256": "dcc6bfbc556b56b9a8d2af799da2bfbd95cd67fc0a7a14d087eab966a30236f5",
+              "bytes": 1501856,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T19:58:26+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版金双马尾蓝眼尖耳与原黑发饰保持；黑骑行短外套紫内搭、黑黄裙裤、腰包、黄护腕、白袜与紫黑高帮鞋和正常版一致；全身完整无额外身体结构，透明底。",
+              "path": "Grok/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "金曜游艺",
+          "palette": "黑金、暖白、深红",
+          "structure": "游艺幻想礼装：黑色短燕尾式礼服外套，暖白高领衬衫、金色短马甲；深红膝上蓬裙，后侧两片短燕尾形成独特轮廓。",
+          "accessories": "金色几何领结、腰侧小怀表；黑金系带短靴与白中筒袜；原金双马尾保留。",
+          "adaptation": "燕尾为独立服装布片，不添加动物尾巴；金发与金马甲有清晰边界。",
+          "pair_contract": "黑短燕尾、白高领、金短马甲、深红蓬裙、怀表与黑金靴一致。",
+          "images": {
+            "正常版": {
+              "id": "grok-fantasy-normal-9072b055190ee9a5",
+              "character_id": "grok",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:01:04+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/18.jpg",
+                  "sha256": "122764c0a23ce9df86c36850267cfd6f63549c03f794bfa094018f856a6c884a"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "9072b055190ee9a56fd39c7bd432eeaccfa19ceb22c9605d8fc4bdb07e24dafc",
+              "bytes": 2153812,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:01:05+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "金双马尾蓝眼尖耳和黑结保持；黑金短燕尾、暖白高领与金马甲、红蓬裙、几何领结怀表、白中袜黑金靴符合设计；燕尾是衣物无动物尾，手提裙自然，全身透明。",
+              "path": "Grok/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "grok-fantasy-q-ec1de47cea42cbc2",
+              "character_id": "grok",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:03:39+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "Grok/正常版/幻想主题礼装.png",
+                  "sha256": "9072b055190ee9a56fd39c7bd432eeaccfa19ceb22c9605d8fc4bdb07e24dafc"
+                },
+                {
+                  "path": "heybox-193355677-20261030/17.jpg",
+                  "sha256": "2ac022280712241cf0e99ef214e16ba90435adfe9b202fbbc2f1477a0597139c"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "9072b055190ee9a56fd39c7bd432eeaccfa19ceb22c9605d8fc4bdb07e24dafc",
+              "sha256": "ec1de47cea42cbc27d097432c8c3d24a3417218cbc55c38d7600510515c205d9",
+              "bytes": 1635082,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:03:40+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版金双马尾蓝眼尖耳及黑结保持；黑金燕尾、白高领金马甲、红蓬裙、领结怀表、白中袜黑金靴与正常版对应；手提裙自然，完整全身无额外身体结构，透明底。",
+              "path": "Grok/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "Grok/原始参考/正常版.jpg",
+          "sha256": "122764c0a23ce9df86c36850267cfd6f63549c03f794bfa094018f856a6c884a",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/4a7b32a2ed7635f1465677cfe201b40a.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 401646,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/18.jpg",
+          "original_filename": "18.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "Grok/原始参考/Q版.jpg",
+          "sha256": "2ac022280712241cf0e99ef214e16ba90435adfe9b202fbbc2f1477a0597139c",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/7ae4a08ad80c4861149f206ef1a84c37.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 251347,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/17.jpg",
+          "original_filename": "17.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "Grok/设计对照/三套服装对照-v2.png",
+        "sha256": "0ef56303173cd1455c127273c0e1db6cfd76e8fd09fb1da35be8efce12b324e7",
+        "bytes": 963649,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T20:03:45+08:00",
+        "inputs": [
+          "c566b2eb4388f56069ef97c07573ff6d77776dcdc43e33b2a83cd9492f8f5cc9",
+          "a5bb6bcdee441807c346a955326cb7ac1f0b204387df3faa6e702a7ee1805b21",
+          "415192930d0be7922332226cb9dc875997756ef4156baf6b4ec7abc1db45ee1f",
+          "dcc6bfbc556b56b9a8d2af799da2bfbd95cd67fc0a7a14d087eab966a30236f5",
+          "9072b055190ee9a56fd39c7bd432eeaccfa19ceb22c9605d8fc4bdb07e24dafc",
+          "ec1de47cea42cbc27d097432c8c3d24a3417218cbc55c38d7600510515c205d9"
+        ]
+      }
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "features": [
+        "橙色短发",
+        "白帽",
+        "海螺与录音设备元素",
+        "原有面部特征与眼睛颜色"
+      ],
+      "identity_note": "身份按已确认原始参考保持；发色、眼睛、面部、基础体型及种族结构不因服装重设。Q版沿用原有短比例风格。",
+      "outfits": [
+        {
+          "id": "casual",
+          "name": "日常休闲装",
+          "title": "海螺电台",
+          "palette": "白色、桃橙、浅海绿",
+          "structure": "桃橙色短袖圆领上衣，浅海绿宽肩带A字背带裙及膝；白色短袜，柔和电台日常风。",
+          "accessories": "原白帽加入小海螺扣，胸前小录音笔挂件，米白手提袋；白橙圆头便鞋。",
+          "adaptation": "白帽轮廓和橙色短发保持；录音设备与衣服相连，不长在身体上。",
+          "pair_contract": "桃橙上衣、浅绿背带裙、白帽海螺扣、录音笔挂件与白橙便鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "minimax-casual-normal-d4fb7d7b6b0027c9",
+              "character_id": "minimax",
+              "outfit_id": "casual",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:07:29+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/20.jpg",
+                  "sha256": "d4887109de9688035b322cb825514223825b177e2f412f289f5db84ae12cfc08"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "d4fb7d7b6b0027c9c1483125b69ec1c2a65ae08bef007adc4c07fec8f464694f",
+              "bytes": 1667874,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:07:29+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "橙短发暖橙红眼、白帽海螺与录音元素保留；桃橙圆领短袖、浅海绿背带A字裙、米白包与白橙鞋白袜符合设计；海螺手持自然、设备为挂件非身体，全身透明。",
+              "path": "MiniMax/正常版/日常休闲装.png"
+            },
+            "Q版": {
+              "id": "minimax-casual-q-e3871a57a871f084",
+              "character_id": "minimax",
+              "outfit_id": "casual",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:10:04+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "MiniMax/正常版/日常休闲装.png",
+                  "sha256": "d4fb7d7b6b0027c9c1483125b69ec1c2a65ae08bef007adc4c07fec8f464694f"
+                },
+                {
+                  "path": "heybox-193355677-20261030/19.jpg",
+                  "sha256": "be7ba026d72ec312fdeaa4a001449829c2bfab975e3b23a5f36da3be6bd1464b"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "d4fb7d7b6b0027c9c1483125b69ec1c2a65ae08bef007adc4c07fec8f464694f",
+              "sha256": "e3871a57a871f0847cce29709962429e45d6cc1a1e9af7cb1c6191a806b29219",
+              "bytes": 980646,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:10:05+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版橙短发暖橙红眼白帽、海螺与录音挂件保持；桃橙短袖、浅绿背带裙、米白包、白袜橙白鞋与正常版对应；手持海螺自然、完整全身，透明底。",
+              "path": "MiniMax/Q版/日常休闲装.png"
+            }
+          }
+        },
+        {
+          "id": "functional",
+          "name": "外出机能装",
+          "title": "海岸采声",
+          "palette": "奶白、橙色、海军蓝",
+          "structure": "奶白多袋摄影背心配橙色轻薄长袖内搭；海军蓝九分工装裤，腰部可调节束带。",
+          "accessories": "原白帽配橙细带、海螺徽章、小型录音设备腰袋；蓝白防水短靴与橙边白袜。",
+          "adaptation": "手持/腰挂录音器只用一套，不凭空增加手；帽下橙短发边缘清晰。",
+          "pair_contract": "白多袋背心、橙长袖、蓝九分工装裤、白帽橙带、录音腰袋与蓝白靴一致。",
+          "images": {
+            "正常版": {
+              "id": "minimax-functional-normal-23450fd9a9d6a424",
+              "character_id": "minimax",
+              "outfit_id": "functional",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:12:51+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/20.jpg",
+                  "sha256": "d4887109de9688035b322cb825514223825b177e2f412f289f5db84ae12cfc08"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "23450fd9a9d6a424c78b8792f6180b73ad75d06536fe58c0eae324ce17d876d7",
+              "bytes": 1785263,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:12:51+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "橙短发暖橙红眼白帽及海螺保持；奶白多袋背心、橙长袖、海军蓝工装裤、单套录音腰袋、橙边白袜蓝白靴符合设计；设备与手部自然，无额外手臂，完整全身透明底。",
+              "path": "MiniMax/正常版/外出机能装.png"
+            },
+            "Q版": {
+              "id": "minimax-functional-q-4eb94fa2c7fd7fe5",
+              "character_id": "minimax",
+              "outfit_id": "functional",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:18:54+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "MiniMax/正常版/外出机能装.png",
+                  "sha256": "23450fd9a9d6a424c78b8792f6180b73ad75d06536fe58c0eae324ce17d876d7"
+                },
+                {
+                  "path": "heybox-193355677-20261030/19.jpg",
+                  "sha256": "be7ba026d72ec312fdeaa4a001449829c2bfab975e3b23a5f36da3be6bd1464b"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "23450fd9a9d6a424c78b8792f6180b73ad75d06536fe58c0eae324ce17d876d7",
+              "sha256": "4eb94fa2c7fd7fe50a02f67485f66cc80cac8a47422e8a9727b651c6b90e5111",
+              "bytes": 1159284,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:18:57+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "Q版橙短发暖橙红眼白帽海螺身份保持；奶白多袋背心、橙长袖蓝工装裤、单套录音腰袋、海螺徽饰、蓝白靴橙边白袜与正常版对应；完整全身，无多手穿模，透明底。",
+              "path": "MiniMax/Q版/外出机能装.png"
+            }
+          }
+        },
+        {
+          "id": "fantasy",
+          "name": "幻想主题礼装",
+          "title": "贝音庆典",
+          "palette": "珍珠白、珊瑚橙、浅金",
+          "structure": "海螺庆典礼装：珍珠白圆肩小披领，珊瑚橙束腰上衣与珍珠白阶梯状扇贝裙，及膝三层裙边。",
+          "accessories": "原白帽加入扇贝形浅金帽带、海螺胸饰、复古小麦克风斜挎配件；珊瑚橙T字礼鞋和白短袜。",
+          "adaptation": "白帽与橙短发仍为主体标记；麦克风是可卸挂件，裙边不增加腿或触手。",
+          "pair_contract": "白圆肩披领、橙束腰上衣、白三层扇贝裙、白帽金扇贝带、麦克风挂件与橙T字鞋一致。",
+          "images": {
+            "正常版": {
+              "id": "minimax-fantasy-normal-62b55afd5ca7ed91",
+              "character_id": "minimax",
+              "outfit_id": "fantasy",
+              "form": "正常版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:25:07+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "heybox-193355677-20261030/20.jpg",
+                  "sha256": "d4887109de9688035b322cb825514223825b177e2f412f289f5db84ae12cfc08"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": null,
+              "sha256": "62b55afd5ca7ed91fd33ac70277ab64a35323c9f4d7ac762de67b22ac0fb3d2e",
+              "bytes": 1945377,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1024,
+              "height": 1536,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 254,
+              "accepted_at": "2026-11-13T20:25:35+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit"
+              ],
+              "review_note": "已目视核对：橙短发与暖橙红双眼、白帽金扇贝带、白圆肩披领、橙束腰上衣、白三层扇贝裙、麦克风挂件及橙T字礼鞋齐全；完整全身，双手与肢体自然，原生透明alpha保留。",
+              "path": "MiniMax/正常版/幻想主题礼装.png"
+            },
+            "Q版": {
+              "id": "minimax-fantasy-q-243a8dbf495918a5",
+              "character_id": "minimax",
+              "outfit_id": "fantasy",
+              "form": "Q版",
+              "status": "accepted",
+              "recorded_at": "2026-11-13T20:27:42+08:00",
+              "generator": "Codex内置图像生成",
+              "generation_id": null,
+              "generation_references": [
+                {
+                  "path": "MiniMax/正常版/幻想主题礼装.png",
+                  "sha256": "62b55afd5ca7ed91fd33ac70277ab64a35323c9f4d7ac762de67b22ac0fb3d2e"
+                },
+                {
+                  "path": "heybox-193355677-20261030/19.jpg",
+                  "sha256": "be7ba026d72ec312fdeaa4a001449829c2bfab975e3b23a5f36da3be6bd1464b"
+                }
+              ],
+              "note": "逐张单次调用；提示词及参考散列见generation-jobs。local_source_id仅为本地源文件标识，服务端请求编号未知。",
+              "paired_normal_sha256": "62b55afd5ca7ed91fd33ac70277ab64a35323c9f4d7ac762de67b22ac0fb3d2e",
+              "sha256": "243a8dbf495918a509c06fae8d3360bbd70a480181b9e18c537341d70ecd6eee",
+              "bytes": 1307065,
+              "format": "PNG",
+              "mode": "RGBA",
+              "width": 1254,
+              "height": 1254,
+              "alpha_channel": true,
+              "has_transparent_pixels": true,
+              "alpha_min": 0,
+              "alpha_max": 255,
+              "accepted_at": "2026-11-13T20:27:43+08:00",
+              "reviewer": "主代理或分工代理逐张目视",
+              "review_checks": [
+                "anatomy",
+                "background",
+                "full_body",
+                "identity",
+                "outfit",
+                "pair"
+              ],
+              "review_note": "已与采用正常版逐项目视配对：橙短发暖橙红眼、白帽金扇贝带、白圆肩披领、橙束腰上衣、白三层扇贝裙、海螺与麦克风挂件、白袜橙T字鞋一致；Q版独立短比例完整全身，肢体自然，原生透明alpha保留。",
+              "path": "MiniMax/Q版/幻想主题礼装.png"
+            }
+          }
+        }
+      ],
+      "references": {
+        "正常版": {
+          "path": "MiniMax/原始参考/正常版.jpg",
+          "sha256": "d4887109de9688035b322cb825514223825b177e2f412f289f5db84ae12cfc08",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/322b274a8cade7e8ee6db033d0e26d72.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 323581,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 1280,
+          "height": 2293,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/20.jpg",
+          "original_filename": "20.jpg",
+          "byte_identical_copy": true
+        },
+        "Q版": {
+          "path": "MiniMax/原始参考/Q版.jpg",
+          "sha256": "be7ba026d72ec312fdeaa4a001449829c2bfab975e3b23a5f36da3be6bd1464b",
+          "source_url": "https://www.xiaoheihe.cn/app/bbs/link/193355677",
+          "source_image_url": "https://imgheybox1.max-c.com/bbs/2026/10/10/a93c42433c716838e54148ce80f9d94b.jpeg",
+          "archive_manifest": "heybox-193355677-20261030/manifest.json",
+          "mapping_evidence": "用户角色顺序及特征、归档README/manifest、旧映射与主代理逐角色配对目视核实",
+          "license_status": "作者及逐图许可待确认",
+          "bytes": 189659,
+          "format": "JPEG",
+          "mode": "RGB",
+          "width": 941,
+          "height": 1672,
+          "alpha_channel": false,
+          "has_transparent_pixels": false,
+          "alpha_min": 255,
+          "alpha_max": 255,
+          "original_path": "heybox-193355677-20261030/19.jpg",
+          "original_filename": "19.jpg",
+          "byte_identical_copy": true
+        }
+      },
+      "comparison": {
+        "path": "MiniMax/设计对照/三套服装对照-v2.png",
+        "sha256": "3812c3a863136158169466e53a623a84b945d49a3c8666aec0d0c5fc10a62642",
+        "bytes": 721966,
+        "format": "PNG",
+        "mode": "RGB",
+        "width": 2400,
+        "height": 1040,
+        "alpha_channel": false,
+        "has_transparent_pixels": false,
+        "alpha_min": 255,
+        "alpha_max": 255,
+        "layout_version": 2,
+        "kind": "composite_from_accepted",
+        "created_at": "2026-11-13T20:27:48+08:00",
+        "inputs": [
+          "d4fb7d7b6b0027c9c1483125b69ec1c2a65ae08bef007adc4c07fec8f464694f",
+          "e3871a57a871f0847cce29709962429e45d6cc1a1e9af7cb1c6191a806b29219",
+          "23450fd9a9d6a424c78b8792f6180b73ad75d06536fe58c0eae324ce17d876d7",
+          "4eb94fa2c7fd7fe50a02f67485f66cc80cac8a47422e8a9727b651c6b90e5111",
+          "62b55afd5ca7ed91fd33ac70277ab64a35323c9f4d7ac762de67b22ac0fb3d2e",
+          "243a8dbf495918a509c06fae8d3360bbd70a480181b9e18c537341d70ecd6eee"
+        ]
+      }
+    }
+  ],
+  "overview": {
+    "path": "九位角色服装总览-v2.png",
+    "sha256": "a06510684b6ad0d920619d766e2a3edca80c1c50d3fefb399467630100b66288",
+    "bytes": 2493412,
+    "format": "PNG",
+    "mode": "RGB",
+    "width": 3600,
+    "height": 1800,
+    "alpha_channel": false,
+    "has_transparent_pixels": false,
+    "alpha_min": 255,
+    "alpha_max": 255,
+    "layout_version": 2,
+    "kind": "composite_from_accepted",
+    "created_at": "2026-11-13T20:27:49+08:00"
+  },
+  "updated_at": "2026-11-13T20:27:49+08:00",
+  "progress": {
+    "accepted": 54,
+    "target": 54,
+    "completed_pairs": 27,
+    "characters": [
+      {
+        "id": "feiyu",
+        "name": "肥鱼",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "肥鱼/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "gpt",
+        "name": "GPT龙娘",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "GPT龙娘/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "claude",
+        "name": "Claude",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "Claude/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "gemini",
+        "name": "Gemini",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "Gemini/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "glm",
+        "name": "GLM",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "GLM/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "kimi",
+        "name": "Kimi",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "Kimi/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "qwen",
+        "name": "千问",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "千问/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "grok",
+        "name": "Grok",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "Grok/设计对照/三套服装对照-v2.png"
+      },
+      {
+        "id": "minimax",
+        "name": "MiniMax",
+        "accepted": 6,
+        "pairs": 3,
+        "comparison": "MiniMax/设计对照/三套服装对照-v2.png"
+      }
+    ],
+    "pending_review": [],
+    "rejected": [
+      "feiyu-functional-normal-7c3e793ea45bcb59",
+      "glm-casual-normal-c2a0b2cd8e37a4c4",
+      "kimi-functional-normal-0d4f4ee5ddeef3bd"
+    ]
+  },
+  "status_note": "仅status=accepted的图片可作有效成品；未制作为null。自动检查不代替人工目视。",
+  "public_export": {
+    "version": 1,
+    "date": "2026-11-17",
+    "note": "公开版移除本机目录、会话及工具产物标识；路径相对于本索引目录。图片字节和原验收散列保持。"
+  }
+}

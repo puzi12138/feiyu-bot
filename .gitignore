@@ -122,3 +122,7 @@ desktop.ini
 *.swo
 *.bak
 *.tmp
+
+# Explicitly requested, reviewed character library only.
+!/assets/ai-character-references/**/*.png
+!/assets/ai-character-references/**/*.jpg

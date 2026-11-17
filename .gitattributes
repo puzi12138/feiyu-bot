@@ -22,3 +22,7 @@
 # Preserve any future reviewed diff bytes, including upstream line endings.
 *.patch -text
 *.diff -text
+
+# Keep reviewed artwork byte-identical.
+*.png binary
+*.jpg binary

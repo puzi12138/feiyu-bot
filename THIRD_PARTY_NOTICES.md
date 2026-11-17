@@ -53,3 +53,7 @@ The legacy vendor `echarts.min.js` declares ECharts 5.4.3 and ZRender 5.4.4. Exa
 The adapters under `upstream/local/`, native source under `integrations/native-bridge/`, `feiyu_agent_soul`, `feiyu_steward` and maintenance/launch scripts contain original local adaptations published at the project owner's explicit direction. No blanket license is selected by this notice, and it does not replace any upstream component's license.
 
 Native launch integrity checks pin hashes of both custom modules and the upstream bundle. Redaction or reconstruction changes those hashes. Regenerate the manifest only from the complete reviewed rebuilt file set and retain the integrity checks. This archive does not include account configuration, runtime receipts, credentials or production ledgers.
+
+## Character reference and wardrobe artwork
+
+The separately requested [character library](assets/ai-character-references/README.md) includes AI-generated wardrobe variants, comparison sheets and archived third-party character references. Source links and author/license uncertainties are preserved in its original reference README. Public storage is not a blanket license or commercial-use grant; no code license in this repository applies automatically to these images. The original image bytes and provenance metadata are retained; local filesystem paths and private conversation/tool identifiers are omitted from the public catalog.
