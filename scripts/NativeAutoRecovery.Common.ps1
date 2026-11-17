@@ -141,8 +141,8 @@ function Get-NativeAutoContext([string]$Root) {
  Assert-PilotStage; Assert-NativeAutoPersonal
  $configuration=Get-DailyConfiguration
  if($configuration.Fingerprint -ne $script:NativeAutoFingerprint -or $configuration.ReceiptDirectory -ne (Join-Path $script:NativeAutoStage 'pilot-runs\20261026-122046-40bd601d\receipts')){throw 'auto_delivery_namespace_changed'}
- $client=Read-PilotJson (Join-Path $Root 'config\qq-client.json')
- if($client.executable -ne $script:NativeAutoExe -or $client.expectedUin -ne '0' -or $client.arguments){throw 'auto_client_configuration_changed'}
+ $client=Read-DailyClient
+ if($client.executable -ne $script:NativeAutoExe){throw 'auto_client_configuration_changed'}
  $ports=@(Get-NetTCPConnection -State Listen -ErrorAction Stop)
  $snowPorts=@($ports|Where-Object LocalPort -eq 5099)
  if($snowPorts.Count -ne 1 -or $snowPorts[0].LocalAddress -ne '127.0.0.1'){return [pscustomobject]@{Allowed=$false;GateReason='snow_control_unavailable'}}
@@ -157,24 +157,20 @@ function Get-NativeAutoContext([string]$Root) {
    Assert-PilotPrivateAcl $pendingPath;$pending=Read-PilotJson $pendingPath;Assert-DailyPendingValue $pending $configuration
    if($pending.NativeProcess.Exe -ne $script:NativeAutoExe){throw 'auto_pending_installation_changed'}
    $p=Get-PilotProcess $pending.NativeProcess.Id
-   if($p){if(!(Test-NativeAutoIdentity $p $pending.NativeProcess)){throw 'auto_pending_pid_reused'};$pendingAlive=$true}
+   if($p){if(!(Test-NativeAutoIdentity $p $pending.NativeProcess)){throw 'auto_pending_pid_reused'};$null=Assert-DailyProfileProcess $pending.NativeProcess $client;$pendingAlive=$true}
  }
  $bound=Get-PilotProcess $binding.NativeProcess.Id
  if($bound -and !(Test-NativeAutoIdentity $bound $binding.NativeProcess)){throw 'auto_bound_pid_reused'}
- $rows=@(Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" -ErrorAction Stop|Where-Object ExecutablePath -eq $script:NativeAutoExe)
- $roots=@($rows|Where-Object {$_.CommandLine -notmatch '(?i)(?:^|\s)--type(?:=|\s)'}|ForEach-Object {
-   [pscustomobject]@{Id=[int]$_.ProcessId;Parent=[int]$_.ParentProcessId;Exe=[string]$_.ExecutablePath;CreatedUtc=$_.CreationDate.ToUniversalTime().ToString('o');Name='QQ.exe';Relaunch=($_.CommandLine -match '(?i)(?:^|\s)--relaunch(?:\s|$)')}
- })
- if($roots.Count -eq 1){
-   $tree=@(Get-PilotTree $roots[0])
-   if(@($rows|Where-Object ProcessId -notin @($tree.Id)).Count){throw 'auto_unbound_dedicated_children_present'}
- } elseif($rows.Count -and !$roots.Count){throw 'auto_orphan_dedicated_children_present'}
+ if($bound){$null=Assert-DailyProfileProcess $binding.NativeProcess $client}
+ $snapshot=Get-DailyDedicatedSnapshot $client
+ $roots=@($snapshot.Roots)
  $holders=@(Get-BotHolderPids);$nativeOnline=$false;$snowOnline=$false;$native=$null
  if($listeners.Count){
    $native=Get-PilotProcess ([int]$listeners[0].OwningProcess)
    $expected=$binding.NativeProcess
    if($pending -and $pending.Active){$expected=$pending.NativeProcess}
    if(!(Test-NativeAutoIdentity $native $expected)){throw 'auto_native_owner_not_known_generation'}
+   $null=Assert-DailyProfileProcess $native $client
    $null=Assert-PilotIdentityBinding $native $configuration.ReceiptDirectory;$nativeOnline=$true
    $headers=Get-SnowPilotHeaders
    try {$list=(Invoke-RestMethod 'http://127.0.0.1:5099/api/processes' -Headers $headers -TimeoutSec 5).list}finally{$headers=$null}
@@ -204,6 +200,8 @@ function Get-NativeAutoPendingContinuation($Attempt) {
  if(!$pending.Active -or $pending.StartId -notmatch '^[0-9]{8}-[0-9]{6}-[a-f0-9]{8}$' -or $pending.NativeProcess.Exe -ne $script:NativeAutoExe){return $null}
  $actual=Get-PilotProcess $pending.NativeProcess.Id
  if(!(Test-NativeAutoIdentity $actual $pending.NativeProcess)){return $null}
+ Assert-DailyPendingProfile $pending (Read-DailyClient)
+ $null=Assert-DailyProfileProcess $pending.NativeProcess
  $start=Read-PilotJson (Join-Path $script:DailyRoot ('starts\'+$pending.StartId+'\state.json'))
  if($start.StartId -ne $pending.StartId -or !(Test-NativeAutoIdentity $start.NativeProcess $pending.NativeProcess) -or !$start.Launcher -or
    $start.Launcher.Parent -ne $PID -or ([datetimeoffset]$start.StartedUtc) -lt ([datetimeoffset]$Attempt.AtUtc)){return $null}
@@ -263,7 +261,7 @@ function Invoke-NativeAutoSnowReconnect($Context) {
    $mutex=[IO.FileStream]::new((Join-Path $script:DailyRoot '.launcher-lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
    Assert-NativeAutoPersonal;Assert-DailyConfigurationUnchanged $Context.Configuration
    $null=Assert-PilotIdentityBinding $Context.NativeProcess $Context.Configuration.ReceiptDirectory
-   $null=Connect-SnowPilotProcess $Context.NativeProcess
+   $null=Connect-DailySnowProcess $Context.NativeProcess
    $startId=$Context.Binding.StartId
    if($Context.Pending){$startId=$Context.Pending.StartId}
    $null=Save-DailyBinding $Context.NativeProcess $Context.Configuration $startId
@@ -317,7 +315,7 @@ function Invoke-NativeAutoRecovery([string]$Root,[switch]$Execute) {
      if($freshDecision.Action -ne $decision.Action -or !(Test-NativeAutoIdentity $freshDecision.Target $decision.Target)){throw 'auto_snapshot_changed_before_action'}
      if($decision.Action -eq 'Restart'){
        $state.ActiveAttempt.Stage='stopping_verified_relaunch';Write-DailyJson $statePath $state
-       Stop-PilotTree $decision.Target;Assert-NativeAutoPersonal;Assert-DailyConfigurationUnchanged $context.Configuration
+       Stop-DailyProfileTree $decision.Target;Assert-NativeAutoPersonal;Assert-DailyConfigurationUnchanged $context.Configuration
      }
      $state.ActiveAttempt.Stage='invoking_reviewed_daily';Write-DailyJson $statePath $state
      if($decision.Action -eq 'Reconnect') {Invoke-NativeAutoSnowReconnect $fresh}

@@ -29,6 +29,7 @@ from .share_cards import build_share_segment as build_plain_share_segment
 from .share_cards import canonical_share_url
 from .social import prune_owned_meme_cache
 from .native_private_transport import native_delivery, producer_operation
+from .state_recovery import MARKER, recovery_boundary, recovery_held
 
 
 _PEAK_PLATFORM_CONTENT = re.compile(
@@ -43,6 +44,93 @@ def _private_bili_source(item, requested_url=""):
     source = item.get("source", "")
     return (bili_share_source(source, source_platform=item.get("source_platform", ""))
             or bili_share_source(requested_url))
+
+
+
+def _private_source_time(doc):
+    """Read only a platform publication timestamp, never a local observation.
+
+    Args:
+        doc: Actual source-reader metadata.
+
+    Returns:
+        A finite publication epoch, or None when the source is unproven.
+    """
+    value = doc.get("post_created_at") if doc.get("source") == "heybox" else doc.get("pubdate")
+    try:
+        if isinstance(value, bool) or value in (None, ""):
+            return None
+        try:
+            stamp = float(value)
+        except (ValueError, TypeError):
+            parsed = datetime.fromisoformat(str(value))
+            if parsed.tzinfo is None:
+                return None
+            stamp = parsed.timestamp()
+        return stamp if math.isfinite(stamp) and stamp > 0 else None
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _private_recovery_live(host, task, state, guards, *, check_task=True):
+    """Reject retired hosts and replaced state or recovery-guard bindings.
+
+    Args:
+        host: Original producer instance.
+        task: Original owning coroutine task.
+        state: State object captured before asynchronous work.
+        guards: Recovery guard handle captured with the state.
+        check_task: Whether this check runs in the owning task itself.
+
+    Returns:
+        Whether the original producer and its owning task remain current.
+    """
+    return (getattr(host, "_group_provider_terminated", False) is False
+            and host.state is state
+            and getattr(host, "_state_recovery_guards", None) is guards
+            and task is not None and not task.done()
+            and (not check_task or asyncio.current_task() is task))
+
+
+def _private_recovery_check(state, kind, now, *, manual=False, expected=None,
+                            source_at=None, require_source=False):
+    """Bind fresh private work to its exact recovery generation and new slot.
+
+    Args:
+        state: Existing host state; this function never changes it.
+        kind: Ordinary chat or sourced content.
+        now: Current epoch, used only for scheduling and future-time rejection.
+        manual: Existing explicit current-owner authorization.
+        expected: Previously captured exact lane boundaries, if any.
+        source_at: Real platform publication epoch for sourced content.
+        require_source: Require publication evidence before model or send work.
+
+    Returns:
+        A sanitized blocking reason and the current lane boundary mapping.
+    """
+    if manual:
+        return "", None
+    lanes = ("private_items", "owner_proactive") if kind == "chat" else ("private_items",)
+    scope = {lane: recovery_boundary(state, lane) for lane in lanes}
+    if any(recovery_held(state, lane) for lane in lanes):
+        return "state_recovery_hold", scope
+    if expected is not None and scope != expected:
+        return "state_recovery_boundary_changed", scope
+    for boundary in scope.values():
+        if boundary is None:
+            continue
+        if now < boundary["not_before"]:
+            return "state_recovery_not_before", scope
+        if kind == "chat":
+            slot_start = int(now // 900) * 900
+            if slot_start <= boundary["since"] or slot_start < boundary["not_before"]:
+                return "state_recovery_new_slot_required", scope
+        elif require_source and (type(source_at) not in (int, float)
+                                 or not 0 < source_at <= 253402300799
+                                 or not math.isfinite(source_at)
+                                 or not boundary["since"] < source_at <= now):
+            return "state_recovery_new_source_required", scope
+    return "", scope
 
 
 def chat_block(state, now):
@@ -150,6 +238,10 @@ class ProactiveConversation:
     async def prepare_private(self, kind, topic="抽象日常", url="", manual=False,
                               peak_capability=None):
         """Generate a preview from actual private context or actually read sources."""
+        owning_task, original_state = asyncio.current_task(), self.state
+        original_guards = getattr(self, "_state_recovery_guards", None)
+        if not _private_recovery_live(self, owning_task, original_state, original_guards):
+            return {"ok": False, "reason": "state_recovery_host_retired"}
         if kind not in {"chat", "content"}:
             return {"ok": False, "reason": "unsupported_kind"}
         if peak_capability is not None and (
@@ -159,7 +251,46 @@ class ProactiveConversation:
             return {"ok": False, "reason": "peak_owner_capability_invalid"}
         if kind == "content" and not manual and heybox_post_url(url) and not heybox_owner_off_peak():
             return {"ok": False, "reason": "heybox_off_peak_required"}
+        reason, recovery_scope = _private_recovery_check(self.state, kind, time.time(), manual=manual)
+        if reason:
+            return {"ok": False, "reason": reason}
+        source_at = None
+        source_identity = ""
+
+        def automatic_guard(doc=None):
+            if not _private_recovery_live(self, owning_task, original_state, original_guards,
+                                          check_task=False):
+                return "state_recovery_host_retired"
+            if doc is not None and source_identity and (
+                _private_source_time(doc) != source_at
+                or (canonical_share_url(doc.get("url", "")) or "") != source_identity
+            ):
+                return "state_recovery_source_changed"
+            return _private_recovery_check(
+                self.state, kind, time.time(), manual=manual, expected=recovery_scope,
+                source_at=source_at, require_source=(kind == "content"))[0]
+
+        if kind == "content" and not manual and recovery_scope.get("private_items") is not None:
+            if not url:
+                return {"ok": False, "reason": "state_recovery_new_source_required"}
+            metadata = await self.read_public_content(url, images=False, metadata_only=True)
+            if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                return {"ok": False, "reason": "state_recovery_host_retired"}
+            source_at = _private_source_time(metadata)
+            source_identity = canonical_share_url(metadata.get("url", "")) or ""
+            reason, _ = _private_recovery_check(
+                self.state, kind, time.time(), expected=recovery_scope,
+                source_at=source_at, require_source=True)
+            if not metadata.get("ok") or not source_identity or reason:
+                return {"ok": False, "reason": reason or "state_recovery_new_source_required"}
         persona, turns = await self.private_chat_context()
+        if not _private_recovery_live(self, owning_task, original_state, original_guards):
+            return {"ok": False, "reason": "state_recovery_host_retired"}
+        reason, _ = _private_recovery_check(self.state, kind, time.time(), manual=manual,
+                                           expected=recovery_scope, source_at=source_at,
+                                           require_source=(kind == "content"))
+        if reason:
+            return {"ok": False, "reason": reason}
         if peak_capability is not None:
             # Do not feed past public shares or assistant narration into this
             # lane. Only ordinary owner text can seed a fresh conversation.
@@ -174,9 +305,22 @@ class ProactiveConversation:
         source = ""
         image_inputs = []
         if kind == "content" and url:
-            doc = await self.read_public_content(url, images=True, image_limit=2)
+            doc = await self.read_public_content(
+                url, images=True, image_limit=2,
+                automatic_guard=automatic_guard if not manual and any(recovery_scope.values()) else None)
+            if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                return {"ok": False, "reason": "state_recovery_host_retired"}
             if not doc.get("ok"):
                 return {"ok": False, "reason": doc.get("reason", "source_unread")}
+            if not manual and recovery_scope.get("private_items") is not None:
+                if (_private_source_time(doc) != source_at
+                        or (canonical_share_url(doc.get("url", "")) or "") != source_identity):
+                    return {"ok": False, "reason": "state_recovery_source_changed"}
+                reason, _ = _private_recovery_check(
+                    self.state, kind, time.time(), expected=recovery_scope,
+                    source_at=source_at, require_source=True)
+                if reason:
+                    return {"ok": False, "reason": reason}
             if (not manual and (doc.get("source") == "heybox" or heybox_post_url(url))
                     and not heybox_owner_off_peak()):
                 return {"ok": False, "reason": "heybox_off_peak_required"}
@@ -229,6 +373,11 @@ class ProactiveConversation:
             '{"worthy":true或false,"safe":true或false,"text":"私聊正文"}。'
             "有图片时色情、血腥、仇恨、人肉、私人聊天截图、联系方式或看不清都safe=false。"
         )
+        reason, _ = _private_recovery_check(self.state, kind, time.time(), manual=manual,
+                                           expected=recovery_scope, source_at=source_at,
+                                           require_source=(kind == "content"))
+        if reason:
+            return {"ok": False, "reason": reason}
         exceptional_heybox = (kind == "content" and doc.get("source") == "heybox"
                               and self.state.get("heybox_exceptional_private_only", True))
         if exceptional_heybox:
@@ -251,6 +400,11 @@ class ProactiveConversation:
             "recent": recent, "public_content": {
                 k: doc.get(k) for k in ("title", "text", "subtitle", "image_description", "read_basis")
             } if doc else None}, ensure_ascii=False)
+        if not _private_recovery_live(self, owning_task, original_state, original_guards):
+            return {"ok": False, "reason": "state_recovery_host_retired"}
+        reason = automatic_guard()
+        if reason:
+            return {"ok": False, "reason": reason}
         if peak_capability is None:
             answer = await asyncio.wait_for(
                 self.context.get_provider_by_id("deepseek-flash").text_chat(
@@ -276,6 +430,11 @@ class ProactiveConversation:
                             system_prompt=peak_capability["system_prompt"], request_max_retries=1)
             finally:
                 peak_capability["phase"] = "between"
+        if not _private_recovery_live(self, owning_task, original_state, original_guards):
+            return {"ok": False, "reason": "state_recovery_host_retired"}
+        reason = automatic_guard()
+        if reason:
+            return {"ok": False, "reason": reason}
         result, reason = parse_private_result(getattr(answer, "completion_text", None))
         if reason:
             return {"ok": False, "reason": reason}
@@ -299,7 +458,8 @@ class ProactiveConversation:
         return {"ok": True, "kind": kind, "text": text, "source": source,
                 "source_platform": doc.get("source", ""),
                 "source_title": doc.get("title", ""),
-                "images": image_inputs, "context_turns": len(turns)}
+                "images": image_inputs, "context_turns": len(turns),
+                "recovery_scope": recovery_scope, "source_created_at": source_at}
 
     async def private_image_file(self, value):
         """Use a real owned image or fetch a bounded validated public image."""
@@ -343,6 +503,9 @@ class ProactiveConversation:
         Args:
             url: A public Heybox URL selected by an automatic discovery path.
         """
+        # Old pending URLs and observation-only discovery times stay sealed.
+        if MARKER in self.state:
+            return
         canonical = heybox_post_url(url)
         if not canonical or any(
             heybox_post_url(row.get("source", "")) == canonical
@@ -365,6 +528,8 @@ class ProactiveConversation:
             A sanitized delivery result; unknown sends remain reserved by the
             regular private-items ledger and are never blindly retried.
         """
+        if MARKER in self.state:
+            return {"ok": False, "reason": "state_recovery_old_pending_held"}
         if not heybox_owner_off_peak():
             return {"ok": False, "reason": "heybox_off_peak_required"}
         async with self.lock:
@@ -430,7 +595,17 @@ class ProactiveConversation:
             or not self._validate_owner_proactive_capability(peak_capability, "between")
         ):
             return {"ok": False, "reason": "peak_owner_capability_invalid"}
+        owning_task, original_state = asyncio.current_task(), self.state
+        original_guards = getattr(self, "_state_recovery_guards", None)
+        if not _private_recovery_live(self, owning_task, original_state, original_guards):
+            return {"ok": False, "reason": "state_recovery_host_retired"}
         now = datetime.now(TZ)
+        reason, recovery_scope = _private_recovery_check(
+            self.state, kind, now.timestamp(), manual=manual)
+        if reason:
+            return {"ok": False, "reason": reason}
+        recovery_slot_key = None
+        recovery_slot_row = None
         if kind == "content" and not manual and heybox_post_url(url) and not heybox_owner_off_peak():
             if not dry_run and defer_on_block:
                 async with self.lock:
@@ -441,12 +616,43 @@ class ProactiveConversation:
         if reason and not dry_run:
             return {"ok": False, "reason": reason}
         chat_at_start = self.state.get("last_chat", 0)
+        if kind == "chat" and not manual and any(recovery_scope.values()) and not dry_run:
+            async with self.lock:
+                if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                    return {"ok": False, "reason": "state_recovery_host_retired"}
+                reason, _ = _private_recovery_check(
+                    self.state, kind, time.time(), expected=recovery_scope)
+                if reason:
+                    return {"ok": False, "reason": reason}
+                slots = self.state.get("state_recovery_owner_chat_slots", {})
+                if not isinstance(slots, dict):
+                    return {"ok": False, "reason": "state_recovery_invalid_slots"}
+                slot_now = time.time()
+                recovery_slot_key = hashlib.sha256(json.dumps(
+                    {"boundary": recovery_scope, "slot": int(slot_now // 900)},
+                    sort_keys=True).encode()).hexdigest()
+                if recovery_slot_key in slots:
+                    return {"ok": False, "reason": "state_recovery_slot_reserved"}
+                recovery_slot_row = {"boundary": recovery_scope, "slot": int(slot_now // 900),
+                                     "reserved_at": slot_now}
+                self.state.setdefault("state_recovery_owner_chat_slots", {})[recovery_slot_key] = recovery_slot_row
+                self.save()
         try:
             direct_bvid = bvid_from_source(url) if kind == "content" else ""
             if direct_bvid and not manual and not journaled_bvid(direct_bvid):
                 return {"ok": False, "reason": "bili_journal_required"}
             item = await self.prepare_private(kind, topic, url, manual=manual,
                                               peak_capability=peak_capability)
+            if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                return {"ok": False, "reason": "state_recovery_host_retired"}
+            if not manual and item.get("recovery_scope") != recovery_scope and item.get("ok"):
+                return {"ok": False, "reason": "state_recovery_boundary_changed"}
+            reason, _ = _private_recovery_check(
+                self.state, kind, time.time(), manual=manual, expected=recovery_scope,
+                source_at=item.get("source_created_at"),
+                require_source=(kind == "content" and item.get("ok") is True))
+            if reason:
+                return {"ok": False, "reason": reason}
             if not item.get("ok"):
                 if (item.get("reason") == "heybox_off_peak_required" and not dry_run
                         and not manual and defer_on_block and heybox_post_url(url)):
@@ -480,6 +686,13 @@ class ProactiveConversation:
             for value in item["images"]:
                 try:
                     paths.append(await self.private_image_file(value))
+                    if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                        return {"ok": False, "reason": "state_recovery_host_retired"}
+                    reason, _ = _private_recovery_check(
+                        self.state, kind, time.time(), manual=manual, expected=recovery_scope,
+                        source_at=item.get("source_created_at"), require_source=(kind == "content"))
+                    if reason:
+                        return {"ok": False, "reason": reason}
                     hashes.append(hashlib.sha256(paths[-1].read_bytes()).hexdigest())
                 except Exception:  # noqa: BLE001 - Validate all native image transport failures.
                     # Don't describe an invisible image if retrieval failed.
@@ -495,12 +708,32 @@ class ProactiveConversation:
                         self, item["source"],
                         title=item.get("source_title", ""), summary=item["text"],
                         image=item["images"][0] if item["images"] else "")
+            if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                return {"ok": False, "reason": "state_recovery_host_retired"}
+            reason, _ = _private_recovery_check(
+                self.state, kind, time.time(), manual=manual, expected=recovery_scope,
+                source_at=item.get("source_created_at"), require_source=(kind == "content"))
+            if reason:
+                return {"ok": False, "reason": reason}
             if dry_run:
                 return {**item, "images": [str(x) for x in paths], "sent": False,
                         "share_format": card["format"], "share_segment": card["segment"],
                         "delivery_block": reason}
             async with self.lock:
+                if not _private_recovery_live(self, owning_task, original_state, original_guards):
+                    return {"ok": False, "reason": "state_recovery_host_retired"}
                 now = datetime.now(TZ)
+                reason, _ = _private_recovery_check(
+                    self.state, kind, now.timestamp(), manual=manual, expected=recovery_scope,
+                    source_at=item.get("source_created_at"), require_source=(kind == "content"))
+                if reason:
+                    return {"ok": False, "reason": reason}
+                if recovery_slot_key is not None and (
+                    self.state.get("state_recovery_owner_chat_slots", {}).get(recovery_slot_key) is not recovery_slot_row
+                    or recovery_slot_row["slot"] != int(now.timestamp() // 900)
+                    or recovery_slot_row["boundary"] != recovery_scope
+                ):
+                    return {"ok": False, "reason": "state_recovery_slot_changed"}
                 reason = delivery_block(self.state, "private", now)
                 reason = reason or (chat_block(self.state, now) if kind == "chat" else "")
                 if bili_source:
@@ -555,11 +788,18 @@ class ProactiveConversation:
                     row["source_platform"] = "bilibili"
                     bili_row = {key: row[key] for key in ("source", "source_platform", "created", "status")}
                     self.state.setdefault("bili_private_shares", {})[bili_source] = bili_row
-                self.state["private_items"] = (self.state.get("private_items", []) + [row])[-100:]
+                if not manual and any(recovery_scope.values()):
+                    row["recovery_scope"] = recovery_scope
+                    row["source_created_at"] = item.get("source_created_at")
+                    if recovery_slot_key is not None:
+                        row["recovery_slot"] = recovery_slot_key
+                rows = self.state.get("private_items", []) + [row]
+                self.state["private_items"] = rows if MARKER in self.state else rows[-100:]
                 self.state.setdefault("deliveries", {}).setdefault("private", []).append(now.isoformat())
                 if kind == "chat":
                     self.state["last_proactive_chat"] = now.timestamp()
-                self.state["sent_meme_hashes"] = (self.state.get("sent_meme_hashes", []) + hashes)[-100:]
+                meme_hashes = self.state.get("sent_meme_hashes", []) + hashes
+                self.state["sent_meme_hashes"] = meme_hashes if MARKER in self.state else meme_hashes[-100:]
                 self.save()  # Reserve before I/O: an unknown send must not be retried.
                 try:
                     if peak_capability is not None:

@@ -26,7 +26,7 @@ _FEATURES = frozenset({"heybox_comment", "heybox_qzone_sync", "friend_time_notic
 _STAGES = frozenset({"notice_poll", "qzone_sync_once", "friend_time_send", "friend_time_monitor",
                     "bili_journal_prepare", "bili_journal_read", "bili_journal_source",
                     "bili_journal_model", "bili_journal_journal", "bili_journal_share",
-                    "bili_journal_once", "incident_notice_send", "vision_provider", "heybox_retry_decision",
+                    "bili_journal_once", "bili_source_read", "incident_notice_send", "vision_provider", "heybox_retry_decision",
                     "heybox_send", "heybox_image_dns", "heybox_main_capture", "heybox_main_model",
                     "qzone_session_capture", "qzone_session_refresh", "unknown"})
 _CLASSES = frozenset({"sqlite", "timeout", "connection", "http_client", "heybox_api", "os",
@@ -367,7 +367,75 @@ def _sources(error):
     return frames[-8:]
 
 
-def describe_failure(error=None, stage="unknown", reason=None, *, model_validation=None, poll_client=None):
+def _valid_model_transport(value):
+    """Accept only detached, bounded scalar metadata from the current collector."""
+    fields = {"schema", "generation", "invocation", "event_id", "phase", "started_at",
+              "elapsed_ms", "outcome", "provider", "sdk", "client", "tls_context", "host_sha256",
+              "path_sha256", "certificate_verification", "hostname_verification", "request_count",
+              "requests_truncated", "trace_truncated", "trace", "existing_trace_skipped", "route_changed",
+              "scope_task_mismatch"}
+    def hex_value(item, length):
+        return type(item) is str and len(item) == length and all(c in "0123456789abcdef" for c in item)
+    def bounded(item, upper):
+        return type(item) is int and 0 <= item <= upper
+    if (type(value) is not dict or any(type(key) is not str for key in value)
+            or set(value) not in (fields, fields | {"vision"})):
+        return False
+    if (value["schema"] != 1 or type(value["schema"]) is not int
+            or not hex_value(value["generation"], 32) or not hex_value(value["invocation"], 32)
+            or not bounded(value["event_id"], 999_999_999) or value["event_id"] == 0
+            or type(value["phase"]) is not str or value["phase"] not in {"main", "vision"}
+            or type(value["started_at"]) not in (int, float) or not math.isfinite(value["started_at"])
+            or not 0 < value["started_at"] < 10_000_000_000
+            or not bounded(value["elapsed_ms"], 3_600_000)
+            or type(value["outcome"]) is not str
+            or value["outcome"] not in {"running", "success", "failed", "cancelled", "unknown"}
+            or not bounded(value["request_count"], 16)):
+        return False
+    if not all(hex_value(value[key], 64) for key in ("provider", "sdk", "client", "tls_context", "host_sha256", "path_sha256")):
+        return False
+    if not all(type(value[key]) is bool for key in ("certificate_verification", "hostname_verification",
+            "requests_truncated", "trace_truncated", "existing_trace_skipped", "route_changed", "scope_task_mismatch")):
+        return False
+    events = {prefix + "." + phase for prefix in (
+        "connection.connect_tcp", "proxy.start_tls", "http11.send_request_headers",
+        "http11.send_request_body", "http11.receive_response_headers", "http11.receive_response_body",
+        "http11.response_closed") for phase in ("started", "complete", "failed")}
+    if type(value["trace"]) is not list or len(value["trace"]) > 16:
+        return False
+    for row in value["trace"]:
+        if (type(row) is not dict or any(type(key) is not str for key in row)
+                or not {"event", "elapsed_ms"}.issubset(row)
+                or not set(row).issubset({"event", "elapsed_ms", "source_port", "context_matches", "sni_matches", "timeout_seconds"})
+                or type(row["event"]) is not str or row["event"] not in events
+                or not bounded(row["elapsed_ms"], 3_600_000)):
+            return False
+        if "source_port" in row and (row["event"] != "connection.connect_tcp.complete"
+                or not bounded(row["source_port"], 65535) or row["source_port"] == 0):
+            return False
+        if set(row) & {"context_matches", "sni_matches", "timeout_seconds"}:
+            if row["event"] != "proxy.start_tls.started":
+                return False
+            if any(type(row[key]) is not bool for key in ("context_matches", "sni_matches") if key in row):
+                return False
+            if "timeout_seconds" in row and (type(row["timeout_seconds"]) not in (int, float)
+                    or not math.isfinite(row["timeout_seconds"]) or not 0 < row["timeout_seconds"] <= 600):
+                return False
+    if "vision" in value:
+        visual = value["vision"]
+        if (value["phase"] != "main" or type(visual) is not dict
+                or any(type(key) is not str for key in visual)
+                or set(visual) != {"invocation", "event_id", "outcome", "elapsed_ms", "provider", "sdk", "client", "tls_context", "host_sha256", "path_sha256"}
+                or not hex_value(visual["invocation"], 32) or visual["event_id"] != value["event_id"]
+                or type(visual["event_id"]) is not int or not bounded(visual["elapsed_ms"], 3_600_000)
+                or type(visual["outcome"]) is not str
+                or visual["outcome"] not in {"success", "failed", "cancelled", "unknown"}
+                or not all(hex_value(visual[key], 64) for key in ("provider", "sdk", "client", "tls_context", "host_sha256", "path_sha256"))):
+            return False
+    return True
+
+
+def describe_failure(error=None, stage="unknown", reason=None, *, model_validation=None, poll_client=None, model_transport=None):
     """Return only a fixed safe contract, even for hostile exception metadata."""
     fallback = {"stage": stage if type(stage) is str and stage in _STAGES else "unknown",
                 "error_class": "other", "reason": "", "sources": [], "causes": []}
@@ -378,6 +446,9 @@ def describe_failure(error=None, stage="unknown", reason=None, *, model_validati
             transport = _transport_graph(error, include_suppressed=result["stage"] != "heybox_send")
             if _valid_transport_graph(transport):
                 result["transport"] = transport
+        if (result["stage"] in {"vision_provider", "heybox_main_capture", "heybox_main_model"}
+                and _valid_model_transport(model_transport)):
+            result["model_transport"] = json.loads(json.dumps(model_transport, allow_nan=False))
         if result["stage"] == "notice_poll" and _valid_poll_client(poll_client):
             result["poll_client"] = dict(poll_client)
         if result["stage"] == "heybox_image_dns":
@@ -427,9 +498,14 @@ def _valid_description(value):
     if (type(value) is not dict or set(value) not in (
             fields, fields | {"model_validation"}, fields | {"model_failure"},
             fields | {"transport"}, fields | {"image_dns"}, fields | {"poll_client"},
-            fields | {"transport", "poll_client"})
+            fields | {"transport", "poll_client"}, fields | {"model_transport"},
+            fields | {"transport", "model_transport"})
             or value["stage"] not in _STAGES or value["error_class"] not in _CLASSES
             or value["reason"] not in _REASONS or type(value["causes"]) is not list or len(value["causes"]) > 3):
+        return False
+    if "model_transport" in value and (
+            value["stage"] not in {"vision_provider", "heybox_main_capture", "heybox_main_model"}
+            or not _valid_model_transport(value["model_transport"])):
         return False
     if "transport" in value and (
             value["stage"] not in {"heybox_send", "heybox_main_capture", "heybox_main_model", "notice_poll"}
@@ -492,9 +568,10 @@ def _file_lock(path):
         os.close(fd)
 
 
-def record_failure(root, feature, stage, error=None, reason=None, *, model_validation=None, poll_client=None):
+def record_failure(root, feature, stage, error=None, reason=None, *, model_validation=None, poll_client=None, model_transport=None):
     """Keep first/latest failure per feature; any storage issue is non-fatal."""
-    diagnostic = describe_failure(error, stage, reason, model_validation=model_validation, poll_client=poll_client)
+    diagnostic = describe_failure(error, stage, reason, model_validation=model_validation,
+                                  poll_client=poll_client, model_transport=model_transport)
     temporary = None
     try:
         if root is None or type(feature) is not str or feature not in _FEATURES:
@@ -583,9 +660,13 @@ def record_failure(root, feature, stage, error=None, reason=None, *, model_valid
                 value["last_heybox_main_model"] = entry
             if feature == "heybox_comment" and diagnostic["stage"] == "notice_poll":
                 value["last_heybox_notice_poll"] = entry
+            encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > 32768:
+                # Keep the last valid file; observation must not poison later reads.
+                return diagnostic
             temporary = folder / (feature + "." + uuid.uuid4().hex + ".tmp")
             with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-                json.dump(value, stream, ensure_ascii=False, separators=(",", ":"))
+                stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)

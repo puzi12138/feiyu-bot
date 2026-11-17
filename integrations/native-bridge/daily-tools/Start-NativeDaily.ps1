@@ -11,12 +11,14 @@ if (!(Test-Path -LiteralPath $script:DailyRoot)) { $null=New-Item -ItemType Dire
 $null=Assert-DailyStagePath $script:DailyRoot; Protect-PilotPath $script:DailyRoot
 $mutex=$null; $launcher=$null; $launchRecord=$null; $launchAttempted=$false; $launcherExit=$null; $launchedUtc=$null
 $newBot=$null; $candidates=@(); $original=$null; $stopAttempted=$false; $state=$null; $attemptPath=$null; $preserveNative=$false
+$profileMode=$false
 try {
     # OS handle releases on command exit/crash; the empty file may persist.
     $mutex=[IO.FileStream]::new((Join-Path $script:DailyRoot '.launcher-lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
     $configuration=Get-DailyConfiguration
-    $client=Read-PilotJson "$script:BotRoot\config\qq-client.json"
-    if ($client.expectedUin -ne '0' -or $client.arguments -or !(Test-Path -LiteralPath $client.executable -PathType Leaf)) { throw 'daily_qq_configuration_changed' }
+    $client=Read-DailyClient
+    $profileMode=[bool](Get-DailyUserDataDirectory $client)
+    if (!(Test-Path -LiteralPath $client.executable -PathType Leaf)) { throw 'daily_qq_configuration_changed' }
     $startId=(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
     $attempts=Join-Path $script:DailyRoot 'starts'
     if (!(Test-Path -LiteralPath $attempts)) { $null=New-Item -ItemType Directory -Path $attempts }
@@ -49,14 +51,17 @@ try {
             }
         }
     }
+    $dedicated=Get-DailyDedicatedSnapshot $client
+    if ($profileMode -and $dedicated.Roots.Count -gt 1) { throw 'daily_multiple_dedicated_roots' }
     $listeners=@(Get-DailyListeners)
     if ($listeners.Count) {
         if ($listeners.Count -ne 1 -or $listeners[0].LocalAddress -ne '127.0.0.1') { throw 'daily_bridge_port_conflict' }
         $active=Get-PilotProcess $listeners[0].OwningProcess
         if (!$active -or $active.Exe -ne $client.executable -or $active.Name -ne 'QQ.exe') { throw 'daily_bridge_process_mismatch' }
+        $null=Assert-DailyProfileProcess $active $client
         if ($preserveNative -and !(Test-PilotProcessIdentity $active $newBot)) {throw 'daily_pending_listener_generation_conflict'}
         $null=Assert-PilotIdentityBinding $active $configuration.ReceiptDirectory
-        $null=Connect-SnowPilotProcess $active
+        $null=Connect-DailySnowProcess $active
         $null=Save-DailyBinding $active $configuration $startId
         Write-DailyPending $active $configuration $startId $false 'native_and_snow_ready'
         $state.NativeProcess=$active; $state.Phase='existing_native_and_snow_ready'
@@ -70,7 +75,7 @@ try {
         # another instance; a timeout leaves it intact for the next check.
         if (!(Wait-DailyNativeReady $newBot $configuration $LoginWaitSeconds)) {throw 'daily_native_login_or_startup_required'}
         $null=Save-DailyBinding $newBot $configuration $startId
-        $null=Connect-SnowPilotProcess $newBot
+        $null=Connect-DailySnowProcess $newBot
         $null=Save-DailyBinding $newBot $configuration $startId
         Write-DailyPending $newBot $configuration $startId $false 'native_and_snow_ready'
         $state.Phase='pending_native_and_snow_ready'; Write-DailyJson (Join-Path $attemptPath 'state.json') $state
@@ -82,9 +87,11 @@ try {
     if ($holders.Count -eq 1) {
         $original=Get-PilotProcess $holders[0]
         if (!$original -or $original.Exe -ne $client.executable -or $original.Name -ne 'QQ.exe') { throw 'daily_existing_bot_mismatch' }
+        $null=Assert-DailyProfileProcess $original $client
         if (!$RestartExistingBot) { throw 'daily_existing_bot_requires_explicit_restart' }
         $null=Assert-SnowPilotOnline $original
     }
+    if ($profileMode -and $dedicated.Roots.Count -and !$original) { throw 'daily_unbound_dedicated_root_requires_review' }
     $lock=Get-DailyReceiptLock $configuration.ReceiptDirectory
     if ($lock) {
         if (!$RecoverKnownExitedLock) { throw 'daily_receipt_lock_requires_review' }
@@ -92,30 +99,42 @@ try {
         $owner=Get-PilotProcess $lock.Pid
         if ($owner -and (!$original -or !(Test-PilotProcessIdentity $owner $original) -or !(Test-PilotProcessIdentity $owner $prior.NativeProcess))) { throw 'daily_receipt_lock_owner_conflict' }
     }
+    if ($profileMode -and (!(Test-Path -LiteralPath $script:DailyProfileLauncher -PathType Leaf) -or
+        (Get-Item -LiteralPath $script:DailyProfileLauncher -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'daily_profile_launcher_missing_or_reparse' }
     Test-PilotDirectoryWrite $attemptPath
     Assert-DailyConfigurationUnchanged $configuration
     $beforeQq=@(Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" | ForEach-Object {[int]$_.ProcessId})
     if ($original) {
         $state.OriginalProcess=$original; $state.OriginalStopAttempted=$true; $state.Phase='stopping_verified_bot'; $stopAttempted=$true
         Write-DailyJson (Join-Path $attemptPath 'state.json') $state
-        Stop-PilotTree $original
+        Stop-DailyProfileTree $original
     }
     if ($lock) { Move-DailyKnownExitedLock $configuration $prior }
     if (@(Get-BotHolderPids).Count -or @(Get-DailyListeners).Count) { throw 'daily_prelaunch_runtime_conflict' }
     Assert-DailyConfigurationUnchanged $configuration
+    $launcherExe="$script:PilotStage\napimain.exe"
     $args=@($client.executable,"$script:PilotStage\napiloader.dll","$script:PilotStage\nativeLoader.cjs")
     $argumentLine=($args|ForEach-Object {'"'+$_.Replace('"','')+'"'}) -join ' '
+    $nativeLaunchPath=Join-Path $attemptPath 'launcher-native.jsonl'
+    if ($profileMode) {
+        $launcherExe=$script:DailyProfileLauncher
+        if (!(Test-Path -LiteralPath $launcherExe -PathType Leaf) -or (Get-Item -LiteralPath $launcherExe -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'daily_profile_launcher_missing_or_reparse' }
+        $null=Assert-DailyStagePath $nativeLaunchPath
+        # The helper accepts no QQ executable/profile/extra argument input.
+        $argumentLine='--execute --record-path "'+$nativeLaunchPath+'"'
+    }
     $state.Phase='native_launch_requested'; Write-DailyJson (Join-Path $attemptPath 'state.json') $state
     $launchAttempted=$true
-    $launcher=Start-Process -FilePath "$script:PilotStage\napimain.exe" -ArgumentList $argumentLine -WorkingDirectory $script:PilotStage -WindowStyle Hidden -PassThru
+    $launcher=Start-Process -FilePath $launcherExe -ArgumentList $argumentLine -WorkingDirectory $script:PilotStage -WindowStyle Hidden -PassThru
     $launchedUtc=$launcher.StartTime.ToUniversalTime().ToString('o')
-    $launchRecord=[pscustomobject]@{Id=$launcher.Id;Exe="$script:PilotStage\napimain.exe";CreatedUtc=$launchedUtc;Name='napimain.exe';Parent=$PID}
+    $launchRecord=[pscustomobject]@{Id=$launcher.Id;Exe=$launcherExe;CreatedUtc=$launchedUtc;Name=[IO.Path]::GetFileName($launcherExe);Parent=$PID}
     $launcherCim=Get-PilotProcess $launcher.Id
     if ($launcherCim -and $launcherCim.Exe -eq $launchRecord.Exe -and [Math]::Abs(([datetimeoffset]$launcherCim.CreatedUtc).UtcDateTime.Ticks-([datetimeoffset]$launchedUtc).UtcDateTime.Ticks) -lt 10) { $launchRecord=$launcherCim }
     $state.Launcher=$launchRecord; $state.Phase='launcher_started'; Write-DailyJson (Join-Path $attemptPath 'state.json') $state
     $deadline=(Get-Date).AddSeconds(30)
     do {
         if ($launcher.HasExited) { $launcherExit=$launcher.ExitTime.ToUniversalTime().ToString('o') } else { $null=Assert-PilotProcess $launchRecord }
+        if ($profileMode -and $launcher.HasExited -and $launcher.ExitCode -ne 0) { throw 'daily_profile_launcher_failed_requires_review' }
         $roots=@(Get-CimInstance Win32_Process -Filter "Name='QQ.exe'" | Where-Object {
             $_.ExecutablePath -eq $client.executable -and $_.ProcessId -notin $beforeQq -and $_.ParentProcessId -eq $launchRecord.Id -and
             $_.CreationDate.ToUniversalTime().Ticks -ge ([datetimeoffset]$launchedUtc).UtcDateTime.Ticks -and
@@ -129,6 +148,7 @@ try {
                 $refresh=Get-PilotProcess $expected.Id
                 if (!$refresh) { continue }
                 Assert-DailyCandidateRefresh $expected $refresh
+                $null=Assert-DailyProfileProcess $expected $client
                 # Store the original filtered generation, never the second
                 # PID lookup that might already name a reused process.
                 $bound.Add($expected)
@@ -137,7 +157,10 @@ try {
             $state.NativeCandidates=$candidates; Write-DailyJson (Join-Path $attemptPath 'state.json') $state
         }
         if ($roots.Count -gt 1) { throw 'daily_multiple_new_qq_roots' }
-        if ($candidates.Count -eq 1) { $newBot=$candidates[0]; break }
+        if ($candidates.Count -eq 1 -and (!$profileMode -or $launcher.HasExited)) {
+            if ($profileMode) { Assert-DailyProfileLaunchRecord $nativeLaunchPath $launchRecord $candidates[0] }
+            $newBot=$candidates[0]; break
+        }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
     if (!$newBot) { throw 'daily_new_qq_root_not_bound' }
@@ -147,7 +170,7 @@ try {
     if (!(Wait-DailyNativeReady $newBot $configuration $LoginWaitSeconds)) { throw 'daily_native_login_or_startup_required' }
     # Persist the exact proven lock owner before Snow connection can fail.
     $null=Save-DailyBinding $newBot $configuration $startId
-    $null=Connect-SnowPilotProcess $newBot
+    $null=Connect-DailySnowProcess $newBot
     $null=Save-DailyBinding $newBot $configuration $startId
     Write-DailyPending $newBot $configuration $startId $false 'native_and_snow_ready'
     $state.Phase='new_native_and_snow_ready'; Write-DailyJson (Join-Path $attemptPath 'state.json') $state
@@ -168,13 +191,13 @@ try {
             OrdinaryQqFallbackAttempted=$false;UnknownMessagesRetried=$false} } catch {}
         throw 'Native QQ is kept pending for login or connection. The next daily check will verify this exact process; no ordinary QQ fallback or message retry.'
     }
-    if ($NoOrdinaryRecovery) {
+    if ($NoOrdinaryRecovery -or $profileMode) {
         # Controlled cutovers leave ambiguous new launchers/QQ instances for
         # exact manual inspection. No ordinary QQ, second launch or cleanup.
         if ($attemptPath) {
             try { Write-DailyJson (Join-Path $attemptPath 'failure-and-recovery.json') @{
                 FailedUtc=(Get-Date).ToUniversalTime().ToString('o');OriginalFailure=$failure;
-                NoOrdinaryRecovery=$true;NativeCandidates=$candidates;Launcher=$launchRecord;
+                NoOrdinaryRecovery=$true;FixedProfileMode=$profileMode;NativeCandidates=$candidates;Launcher=$launchRecord;
                 OrdinaryQqFallbackAttempted=$false;UnknownMessagesRetried=$false} } catch {}
         }
         throw 'Controlled native startup stopped without ordinary QQ recovery. Inspect exact recorded generations; no message was retried.'
@@ -204,6 +227,7 @@ try {
                 $refresh=Get-PilotProcess $expected.Id
                 if (!$refresh) { continue }
                 Assert-DailyCandidateRefresh $expected $refresh
+                $null=Assert-DailyProfileProcess $expected $client
                 $late.Add($expected)
             }
             $all=@($candidates)+@($late.ToArray())
@@ -213,7 +237,7 @@ try {
         } catch { $cleanupProven=$false; $recoveryErrors.Add('launcher_cleanup_or_descendant_binding_failed') }
     }
     foreach ($candidate in $candidates) {
-        try { Stop-PilotTree $candidate } catch { $recoveryErrors.Add('native_candidate_cleanup_requires_check') }
+        try { Stop-DailyProfileTree $candidate } catch { $recoveryErrors.Add('native_candidate_cleanup_requires_check') }
     }
     foreach ($candidate in $candidates) {
         try {
@@ -233,7 +257,7 @@ try {
             if ($holders.Count -eq 1) {
                 $restored=Get-PilotProcess $holders[0]
                 if (!$restored -or $restored.Exe -ne $client.executable -or $restored.Name -ne 'QQ.exe') { throw 'recovery_process_identity_unverified' }
-                $null=Connect-SnowPilotProcess $restored
+                $null=Connect-DailySnowProcess $restored
                 Write-DailyJson (Join-Path $attemptPath 'recovery.json') @{RecoveredUtc=(Get-Date).ToUniversalTime().ToString('o');NormalBot=$restored;SnowVerified=$true;NativeRoutingFallbackAuthorized=$false;UnknownMessagesRetried=$false}
             } else { throw 'normal_bot_login_required' }
         } catch { $recoveryErrors.Add('normal_qq_or_snow_recovery_requires_attention') }

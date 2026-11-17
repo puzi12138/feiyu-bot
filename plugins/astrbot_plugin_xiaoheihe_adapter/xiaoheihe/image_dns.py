@@ -1,16 +1,26 @@
 """Bounded HTTPS DNS fallback for one observed official Xiaoheihe image host."""
 
 import asyncio
+import base64
 import ipaddress
 import json
 import re
 import socket
 import ssl
+import struct
+
+import dns.exception
+import dns.flags
+import dns.message
+import dns.opcode
+import dns.rcode
+import dns.rdataclass
+import dns.rdatatype
 
 OFFICIAL_IMAGE_HOSTS = frozenset({"imgheybox1.max-c.com"})
 _HOSTS = OFFICIAL_IMAGE_HOSTS
-_DNS_IP = "223.5.5.5"
-_DNS_HOST = "dns.alidns.com"
+_DNS_IP = "1.12.12.12"
+_DNS_HOST = "doh.pub"
 _DNS_TIMEOUT = 5
 _DNS_MAX_BYTES = 32768
 
@@ -111,6 +121,91 @@ def _parse_secure_dns(host, body):
     return list(dict.fromkeys(address_records[current]))
 
 
+def _parse_dns_wire(host, body, query):
+    """Decode a bounded associated DNS wire answer, then validate its full chain.
+
+    Args:
+        host: One fixed allowlisted Xiaoheihe CDN hostname.
+        body: Certificate-verified DNS wire response bytes.
+        query: The exact DNS query sent in this operation.
+
+    Returns:
+        Public IPv4 addresses accepted by the existing strict chain parser.
+
+    Raises:
+        ValueError: If wire syntax, association, records or addresses are unsafe.
+    """
+    if host not in _HOSTS or not 12 <= len(body) <= _DNS_MAX_BYTES:
+        raise ValueError("image_dns_response")
+    _identifier, _flags, questions, answers, authority, additional = struct.unpack(
+        "!6H", body[:12]
+    )
+    if questions != 1 or not 1 <= answers <= 64 or authority or additional > 1:
+        raise ValueError("image_dns_response")
+    if answers + authority + additional > 64:
+        raise ValueError("image_dns_answer")
+    try:
+        response = dns.message.from_wire(
+            body,
+            one_rr_per_rrset=True,
+            ignore_trailing=False,
+            raise_on_truncation=True,
+            continue_on_error=False,
+        )
+    except dns.exception.DNSException as error:
+        raise ValueError("image_dns_response") from error
+    if (
+        not query.is_response(response)
+        or response.id != query.id
+        or response.opcode() != dns.opcode.QUERY
+        or response.rcode() != dns.rcode.NOERROR
+        or not response.flags & dns.flags.QR
+        or response.flags & dns.flags.TC
+        or response.flags & 0x0040
+        or response.had_tsig
+        or len(response.question) != 1
+        or response.authority
+        or response.additional
+        or (additional == 1) != (response.opt is not None)
+        or (response.opt is not None and response.edns != 0)
+    ):
+        raise ValueError("image_dns_response")
+    question = response.question[0]
+    if (
+        question.name != query.question[0].name
+        or question.name.to_text().lower().removesuffix(".") != host
+        or question.rdtype != dns.rdatatype.A
+        or question.rdclass != dns.rdataclass.IN
+    ):
+        raise ValueError("image_dns_question")
+    records = []
+    for rrset in response.answer:
+        if rrset.rdclass != dns.rdataclass.IN or rrset.rdtype not in {
+            dns.rdatatype.A,
+            dns.rdatatype.CNAME,
+        }:
+            raise ValueError("image_dns_answer")
+        for record in rrset:
+            records.append(
+                {
+                    "name": rrset.name.to_text(),
+                    "type": int(rrset.rdtype),
+                    "data": (
+                        record.address
+                        if rrset.rdtype == dns.rdatatype.A
+                        else record.target.to_text()
+                    ),
+                }
+            )
+    payload = {
+        "Status": 0,
+        "TC": False,
+        "Question": [{"name": question.name.to_text(), "type": 1}],
+        "Answer": records,
+    }
+    return _parse_secure_dns(host, json.dumps(payload, ensure_ascii=True).encode("utf-8"))
+
+
 async def _secure_dns_once(host):
     """Query one fixed certificate-verified HTTPS resolver without retries.
 
@@ -148,9 +243,12 @@ async def _secure_dns_once(host):
                     server_hostname=_DNS_HOST,
                     limit=16384,
                 )
+                query = dns.message.make_query(host, "A", use_edns=False, id=0)
+                encoded = base64.urlsafe_b64encode(query.to_wire()).rstrip(b"=").decode("ascii")
                 request = (
-                    f"GET /resolve?name={host}&type=A HTTP/1.1\r\nHost: {_DNS_HOST}\r\n"
-                    "Accept: application/dns-json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
+                    f"GET /dns-query?dns={encoded} HTTP/1.1\r\nHost: {_DNS_HOST}\r\n"
+                    "Accept: application/dns-message\r\nAccept-Encoding: identity\r\n"
+                    "Connection: close\r\n\r\n"
                 )
                 phase = "write"
                 writer.write(request.encode("ascii"))
@@ -177,7 +275,7 @@ async def _secure_dns_once(host):
                     b"content-encoding", b"identity"
                 ) != b"identity" or headers.get(b"content-type", b"").split(b";", 1)[
                     0
-                ] not in {b"application/json", b"application/dns-json"}:
+                ] not in {b"application/dns-message"}:
                     raise ValueError("image_dns_encoding")
                 length, transfer = (
                     headers.get(b"content-length"),
@@ -225,7 +323,7 @@ async def _secure_dns_once(host):
                         chunks.append(part)
                     body = b"".join(chunks)
                 phase = "validate_dns"
-                result = _parse_secure_dns(host, body)
+                result = _parse_dns_wire(host, body, query)
                 completed = True
                 return result
             except asyncio.CancelledError:

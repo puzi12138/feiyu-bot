@@ -7,7 +7,9 @@
  */
 
 import { runStoryboard } from '../storyboard/pipeline.js';
-import { formatForDetail } from '../storyboard/format.js';
+import { formatForDetail, formatPlanPreview } from '../storyboard/format.js';
+import { hostSpeechToText } from '../storyboard/host-asr.js';
+import { notifyDelivery } from '../storyboard/offload.js';
 
 /**
  * 从 cordis 上下文里取一个**可选**服务（取不到返回 null，绝不抛）。
@@ -41,24 +43,47 @@ export function serviceOf(ctx, name) {
   }
 }
 
-/** 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。 */
+/**
+ * 把每张分镜图提交成附件。两个入口各写过一遍这段循环，收成一处 —— mediaType / 命名改一次就够。
+ *
+ * 交完顺手 `notifyDelivery()`：图上进了会话历史就跟着每一轮请求走，`src/storyboard/offload.js`
+ * 会按 `imageKeep` / `imageKeepMB` 把更早的省略掉（异步、不阻塞、失败只记日志）。
+ */
 export async function attachSheetImages(ctx, result) {
   // **运行期探测，不是 inject 声明**（原因见 src/index.js 的 inject 注释）：
   // 宿主没注册 attachments 时，插件必须照样能加载、工具照样能跑，只是拿不到图片。
-  const saveImage = serviceOf(ctx, 'attachments')?.saveImage;
+  const attachments = serviceOf(ctx, 'attachments');
+  const saveImage = attachments?.saveImage;
   if (typeof saveImage !== 'function') {
     throw new Error('this DSH build has no `attachments` service, so the storyboard image '
       + 'cannot be shown. Upgrade DSH, or use `video_probe` / `video_locate` (text only).');
   }
   const images = [];
   for (const sheet of result.sheets) {
-    images.push(await saveImage({
+    // **必须 `.call(attachments, ...)`**：新版宿主的 saveImage 内部读 `this.compression`，
+    // 把方法从服务上取下来裸调，`this` 就是 undefined ——
+    // 报的是 `Cannot read properties of undefined (reading 'compression')`（0.2.1-rc.5 实报）。
+    images.push(await saveImage.call(attachments, {
       data: sheet.png,
       mediaType: 'image/png',
       name: `storyboard-${sheet.sheet}.png`,
     }));
   }
+  // 图已经进历史了，看一眼要不要把更早的省略掉（**绝不能影响这一轮的交付**）
+  notifyDelivery();
   return images;
+}
+
+/**
+ * 跑一次管线，**带上宿主的 speechToText**（有就优先，没有就原样走 asr.json/HTTP）。
+ *
+ * 两个工具都必须走这里，不要各自 `runStoryboard()`：
+ * `video_zoom` 曾经自己直调，于是同一个文件「分镜能转写、放大变 no-key」（2026-11-02 实报）。
+ * 以后再加入口也请先接这个函数。
+ */
+export async function runWithHost(ctx, options) {
+  const hostAsr = hostSpeechToText(ctx);
+  return runStoryboard(hostAsr ? { ...options, hostAsr } : options);
 }
 
 /**
@@ -69,7 +94,12 @@ export async function attachSheetImages(ctx, result) {
  */
 export async function runAndAttach(ctx, options, problems, cellRange) {
   if (problems.length > 0) throw new Error(`invalid arguments: ${problems.join('; ')}`);
-  const result = await runStoryboard(options);
+  // 宿主有本地 speechToText 时优先用它；没有则 options 原样不变，继续走 asr.json/HTTP。
+  const result = await runWithHost(ctx, options);
+  // 预演：没有图可提交，也**不去碰 attachments 服务**（干跑不该要求宿主有出图能力）
+  if (result.planOnly) {
+    return { images: [], text: formatPlanPreview(result) };
+  }
   return {
     images: await attachSheetImages(ctx, result),
     text: formatForDetail(result, { detail: options.detail, cellRange }),

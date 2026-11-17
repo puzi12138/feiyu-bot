@@ -1,5 +1,6 @@
 # Offline daily-start candidate. Dot-sourcing defines helpers only.
 . "$PSScriptRoot\NativePilot.Common.ps1"
+. "$PSScriptRoot\NativeQQ.Profile.Common.ps1"
 $script:DailyRoot=Join-Path $script:PilotStage 'daily-runtime'
 
 function Get-DailyHash([string]$Text) {
@@ -26,16 +27,21 @@ function Assert-DailyPendingValue($Value,$Configuration) {
         $Value.NativeProcess.Name -ne 'QQ.exe' -or ![IO.Path]::IsPathFullyQualified([string]$Value.NativeProcess.Exe)) { throw 'daily_pending_state_invalid' }
     try { $created=[datetimeoffset]$Value.NativeProcess.CreatedUtc; if ($created.UtcDateTime.Ticks -le 0) {throw 'invalid'} }
     catch {throw 'daily_pending_state_invalid'}
+    Assert-DailyPendingProfile $Value (Read-DailyClient)
 }
 function Write-DailyPending($Process,$Configuration,[string]$StartId,[bool]$Active,[string]$Phase) {
-    Write-DailyJson (Join-Path $script:DailyRoot 'pending.json') @{Schema=1;Active=$Active;StartId=$StartId;
+    $null=Assert-DailyProfileProcess $Process
+    $pending=@{Schema=1;Active=$Active;StartId=$StartId;
         UpdatedUtc=(Get-Date).ToUniversalTime().ToString('o');ConfigurationFingerprint=$Configuration.Fingerprint;
         ReceiptDirectory=$Configuration.ReceiptDirectory;NativeProcess=$Process;Phase=$Phase;UnknownMessagesRetried=$false}
+    $profile=Get-DailyUserDataDirectory (Read-DailyClient)
+    if ($profile) {$pending['UserDataDirectory']=$profile}
+    Write-DailyJson (Join-Path $script:DailyRoot 'pending.json') $pending
 }
 function Wait-DailyNativeReady($Process,$Configuration,[int]$Seconds) {
     $deadline=(Get-Date).AddSeconds($Seconds)
     do {
-        $null=Assert-PilotProcess $Process
+        $null=Assert-DailyProfileProcess $Process
         try { $null=Assert-PilotIdentityBinding $Process $Configuration.ReceiptDirectory; return $true } catch {}
         Start-Sleep -Seconds 1
     } while ((Get-Date) -lt $deadline)
@@ -93,11 +99,13 @@ function Get-DailyConfiguration {
     # run state. Key rotation requires deliberate migration, never a restart.
     $projection='0|0|16199|'+$receipts+'|'+(Get-DailyHash $value.token)
     $value=$null
-    [pscustomobject]@{Fingerprint=(Get-DailyHash $projection);ReceiptDirectory=$receipts;Port=16199}
+    [pscustomobject]@{Fingerprint=(Get-DailyHash $projection);ReceiptDirectory=$receipts;Port=16199;
+        UserDataDirectory=(Get-DailyUserDataDirectory (Read-DailyClient))}
 }
 function Assert-DailyConfigurationUnchanged($Expected) {
     $current=Get-DailyConfiguration
     if ($current.Fingerprint -ne $Expected.Fingerprint -or $current.ReceiptDirectory -ne $Expected.ReceiptDirectory) { throw 'daily_configuration_changed' }
+    if ($Expected.PSObject.Properties['UserDataDirectory'] -and $current.UserDataDirectory -ne $Expected.UserDataDirectory) { throw 'daily_profile_configuration_changed' }
 }
 function Get-DailyListeners {
     # Query errors must not masquerade as an unused port.
@@ -136,6 +144,7 @@ function Assert-DailyKnownLock($Lock,$Binding,$Configuration) {
     catch { throw 'daily_receipt_lock_generation_invalid' }
 }
 function Save-DailyBinding($Process,$Configuration,[string]$StartId) {
+    $null=Assert-DailyProfileProcess $Process
     $null=Assert-PilotIdentityBinding $Process $Configuration.ReceiptDirectory
     Assert-DailyConfigurationUnchanged $Configuration
     $lock=Get-DailyReceiptLock $Configuration.ReceiptDirectory
@@ -143,6 +152,8 @@ function Save-DailyBinding($Process,$Configuration,[string]$StartId) {
     $binding=[ordered]@{Schema=1;StartId=$StartId;BoundUtc=(Get-Date).ToUniversalTime().ToString('o');
         ConfigurationFingerprint=$Configuration.Fingerprint;ReceiptDirectory=$Configuration.ReceiptDirectory;
         NativeProcess=$Process;ReceiptLock=$lock;NoHistoricalReplay=$true}
+    $profile=Get-DailyUserDataDirectory (Read-DailyClient)
+    if ($profile) {$binding['UserDataDirectory']=$profile}
     Write-DailyJson (Join-Path $script:DailyRoot 'binding.json') $binding
     $binding
 }

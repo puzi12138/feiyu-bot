@@ -16,8 +16,9 @@ from .models import Notification, NotificationType, RoutingTarget
 from .repository import Repository
 from .security import clean_untrusted_text, sanitize_reply_text
 from .topic_service import fetch_topic_feed, normalize_topic_ids
+from .feiyu_new_content_retry import report_discovery_result
 
-SyntheticDispatch = Callable[[Notification, dict[str, Any]], Awaitable[None]]
+SyntheticDispatch = Callable[[Notification, dict[str, Any]], Awaitable[bool]]
 ReviewedDelivery = Callable[[RoutingTarget, str], Awaitable[dict[str, Any]]]
 
 SKIP_PATTERN = re.compile(r"(广告|推广|抽奖|开奖|出售|收购|交易|代购|引战|骂战|互喷)", re.I)
@@ -100,6 +101,7 @@ class FeedService:
             "generated": 0, "skipped_invalid_id": 0, "skipped_eligible": 0,
             "skipped_replied": 0, "skipped_existing_event": 0, "skipped_source_gate": 0,
             "stopped_reserve_quota": 0, "stopped_paused": 0, "stopped_run_limit": 0,
+            "skipped_claim_rejected": 0,
         }
         try:
             if feed_paused(self):
@@ -148,6 +150,7 @@ class FeedService:
             cycle["fetched"] = len(posts)
             cycle["phase"] = "scan"
             generated = 0
+            quota_reserved = False
             for post in posts:
                 if feed_paused(self):
                     cycle["stopped_paused"] += 1
@@ -186,9 +189,11 @@ class FeedService:
                 if not feed_post_allowed(self, post, feed_snapshot):
                     cycle["skipped_source_gate"] += 1
                     continue
-                if not await self.repository.reserve_proactive_request(self.profile_id, daily_limit):
-                    cycle["stopped_reserve_quota"] += 1
-                    break
+                if not quota_reserved:
+                    if not await self.repository.reserve_proactive_request(self.profile_id, daily_limit):
+                        cycle["stopped_reserve_quota"] += 1
+                        break
+                    quota_reserved = True
                 observed_at = time.time()
                 post_created_at = _number(post.get("created_at"))
                 notification = Notification(
@@ -225,7 +230,7 @@ class FeedService:
                     source_label = f"推荐流 · {','.join(self._fallback_sources)}"
                 cycle["phase"] = "dispatch"
                 with feiyu_unseen_feed.candidate_scope(self, notification, feed_snapshot, fetch_started_at):
-                    await self.synthetic_dispatch(
+                    claimed = await self.synthetic_dispatch(
                         notification,
                         {
                             "candidate_reason": f"{source_label} · 通过安全过滤器",
@@ -235,6 +240,14 @@ class FeedService:
                             "feed_origin": feed_origin,
                         },
                     )
+                if type(claimed) is not bool:
+                    cycle["phase"] = "dispatch_result_unknown"
+                    raise RequestNotAuthorized("synthetic_dispatch_result_unknown")
+                if claimed is not True:
+                    cycle["skipped_claim_rejected"] += 1
+                    cycle["phase"] = "scan"
+                    continue
+                quota_reserved = False
                 generated += 1
                 cycle["generated"] = generated
                 cycle["phase"] = "scan"
@@ -247,6 +260,7 @@ class FeedService:
             cycle["outcome"] = "failed"
             raise
         finally:
+            report_discovery_result(self, cycle)
             # Fixed phases and aggregate counts only: no source, reply, error
             # text, user/profile/post identifier or credentials enter this log.
             # A diagnostic failure must never change the original result.

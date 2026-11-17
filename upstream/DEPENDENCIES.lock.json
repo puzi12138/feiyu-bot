@@ -40,6 +40,7 @@
         "index.js",
         "lib/journal-policy.mjs",
         "lib/personality.mjs",
+        "lib/network.mjs",
         "lib/service.mjs",
         "prompts/humanistic-reading.md"
       ]
@@ -251,11 +252,12 @@
     },
     {
       "name": "dsh-video-storyboard",
-      "source_kind": "current-non-git-source-snapshot",
+      "source_kind": "upstream-release-snapshot-with-local-compatibility-patch",
       "public_url": "https://github.com/SAOS-3624/dsh-video-storyboard",
-      "git_commit": null,
-      "version": "0.5.12",
-      "version_evidence": "local package metadata, or unknown; upstream base not verified",
+      "git_commit": "13d9c8fdc5e93f2218444164d01876d88b39545d",
+      "version": "0.7.5",
+      "version_evidence": "verified upstream release baseline; installed source includes the listed local CLI compatibility patch",
+      "local_modified_paths": ["bin/storyboard.mjs"],
       "license_evidence": "Apache-2.0",
       "runtime_entry": "bin/storyboard.mjs",
       "snapshot_hash_after_redaction": null,

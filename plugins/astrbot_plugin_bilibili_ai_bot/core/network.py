@@ -1,11 +1,51 @@
 """Plugin-local proxy settings; never modify process-wide proxy variables."""
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 import re
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import aiohttp
 
 from .peak_bridge import business_paused
+
+
+_FOLLOWING_READ_SCOPE = ContextVar("bili_following_read_scope", default=False)
+
+
+class FollowingReadPaused(PermissionError):
+    """A local policy stopped a following-page read before platform I/O."""
+
+
+class FollowingReadHttpError(RuntimeError):
+    """A following-page HTTP status, captured before decoding its body."""
+
+    def __init__(self, status):
+        self.status = status if type(status) is int and 100 <= status <= 599 else None
+        super().__init__("bili_followings_http_failed")
+
+
+class _FollowingReadRequest:
+    def __init__(self, request):
+        self._request = request
+
+    async def __aenter__(self):
+        response = await self._request.__aenter__()
+        if type(response.status) is not int or response.status != 200:
+            await self._request.__aexit__(None, None, None)
+            raise FollowingReadHttpError(response.status)
+        return response
+
+    async def __aexit__(self, *args):
+        return await self._request.__aexit__(*args)
+
+
+@contextmanager
+def following_read_scope():
+    token = _FOLLOWING_READ_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _FOLLOWING_READ_SCOPE.reset(token)
 
 
 def normalize_proxy_url(value):
@@ -80,12 +120,17 @@ class _PeakSession:
 
     def get(self, *args, **kwargs):
         if business_paused():
+            if _FOLLOWING_READ_SCOPE.get():
+                raise FollowingReadPaused("peak_business_request_paused")
             raise PermissionError("peak_business_request_paused")
         # Import lazily: proactive imports network during startup.
         from .proactive import _auto_browse_paused
         if _auto_browse_paused():
+            if _FOLLOWING_READ_SCOPE.get():
+                raise FollowingReadPaused("automatic_bili_daytime_unavailable")
             raise PermissionError("automatic_bili_daytime_unavailable")
-        return self._session.get(*args, **kwargs)
+        request = self._session.get(*args, **kwargs)
+        return _FollowingReadRequest(request) if _FOLLOWING_READ_SCOPE.get() else request
 
     def post(self, *args, **kwargs):
         if business_paused():
@@ -113,6 +158,8 @@ async def plugin_http_session(config):
         async with aiohttp.ClientSession(**options) as session:
             proxied = _ProxySession(session, proxy) if proxy.startswith(("http://", "https://")) else session
             yield _PeakSession(proxied)
+    except (FollowingReadPaused, FollowingReadHttpError):
+        raise
     except (aiohttp.ClientError, OSError) as exc:
         if not proxy:
             raise

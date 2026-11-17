@@ -36,6 +36,8 @@ _ALLOWED = {
     ("heybox", "heybox_comment", "model_timeout", "notice_event", "timeout"),
     ("bili_journal", "bili_journal", "model_failed", "bili_journal_once", "connection"),
     ("bili_journal", "bili_journal", "model_failed", "bili_journal_once", "timeout"),
+    ("bili_journal", "bili_journal", "request_failed", "bili_source_read", "connection"),
+    ("bili_journal", "bili_journal", "request_failed", "bili_source_read", "timeout"),
 }
 _FIELDS = frozenset({"incident_id", "scope", "feature", "category", "stage", "failure_kind",
     "failed_key_hash", "failed_at", "phase", "candidate_key_hash", "observed_at", "event_key_hash",

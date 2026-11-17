@@ -56,7 +56,7 @@ CATEGORIES = {
 }
 STAGES = frozenset({
     "", "feed_once", "notice_poll", "notice_event", "bili_browse_once",
-    "bili_journal_once", "bili_share_once", "autopost_once", "autopost_send",
+    "bili_journal_once", "bili_source_read", "bili_share_once", "autopost_once", "autopost_send",
     "qzone_sync_once", "qzone_sync_send", "public_send", "reply_send", "friend_time_send",
 })
 MAX_INCIDENTS = 256
@@ -762,8 +762,9 @@ class IncidentPolicy:
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             return {"ok": False, "reason": "rejection_handoff_unavailable"}
 
-    async def report_heybox_rejection(self, event_id, outgoing_id, *, stage="reply_send"):
-        """Record one confirmed content rejection without changing F060 rows.
+    async def report_heybox_rejection(self, event_id, outgoing_id, *, stage="reply_send",
+                                     reason="platform_content_rejected"):
+        """Record one strict comment refusal without changing F060 rows.
 
         Only a ``sent`` native receipt permits the caller to continue new
         work. This method never resumes incidents or replays a prior item.
@@ -788,7 +789,7 @@ class IncidentPolicy:
             if (binding is None or binding[0] is not delegate or binding[1] is not self.send_notice
                     or delegate.send_notice is not self.send_notice):
                 return {"ok": False, "isolated": False, "reason": "rejection_notice_binding_invalid", "notification": "unknown"}
-            return await delegate.report(event_id, outgoing_id, stage=stage)
+            return await delegate.report(event_id, outgoing_id, stage=stage, reason=reason)
         except asyncio.CancelledError:
             raise
         except Exception:

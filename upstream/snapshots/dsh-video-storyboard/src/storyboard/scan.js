@@ -6,6 +6,18 @@
  *
  * 做法：ffmpeg 把画面缩到 64×36 rawvideo 喂进来（2304 像素/帧，解码量极小），
  * 逐像素转 HSV，与上一帧求三通道绝对差均值，得到 0–255 的分数。
+
+ *
+ * 两种**可选**打分口径（默认 'abs'，行为与历史版本完全一致）：
+ *
+ *   scoreMode: 'mc'  —— 运动补偿：每个格子在下一帧的 ±r 邻域里找最像的，连最像的都超 τ 才算"变了"，
+ *                       分数 = 变了多少格子 ×255。思路出自 Nagasaka & Tanaka 1992（像素计数 + 双阈值）
+ *                       与 Shahraray 1995（先做邻域块匹配再比）。独立实现，未取其代码。
+ *                       实测（SHOT 27 段 / BBC 11 集）：69.8 → 74.4 / 86.1 → 89.4。
+ *   normalize: 'z'   —— 鲁棒归一化：分数换成"比本片噪声高几倍 σ"（中位数 + IQR/1.349）。
+ *                       目标是让纪录片和短视频共用一套阈值；代价是 SHOT 会掉约 3 个点。
+ *
+ * 更细的实测与失败尝试见 docs/REFERENCES.md 与 bench/signal-processing.md。
  */
 
 import { spawn } from 'node:child_process';
@@ -113,6 +125,76 @@ export function scorePair(prev, cur) {
   }
   const totalWeight = HUE_WEIGHT + SAT_WEIGHT + VAL_WEIGHT;
   return sum / ((cur.length / 3) * totalWeight);
+}
+
+/**
+ * **运动补偿差异**：返回"变了多少像素"的占比（0–1）。
+ *
+ * 对每个格子，在下一帧的 (2r+1)² 邻域里找一个最像的；连最像的都超过 `tau`，才算这个格子"变了"。
+ * 依据：连续运动只会把内容送到附近，换机位则会在邻域里找不到对应——这正是整帧平均差分不开的场景。
+ *
+ * **提前收工**：判据只关心"有没有 ≤ tau 的匹配"，找到就能跳出该格子的搜索。
+ * 实测 64×36、r=2 下 1.0 ms → 0.155 ms，而算出的占比与全量求最小**完全一致**。
+ */
+export function mcRatioScore(prev, cur, width, height, { tau = 15, radius = 2 } = {}) {
+  const n = width * height;
+  let changed = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p3 = (y * width + x) * 3;
+      let matched = false;
+      for (let dy = -radius; dy <= radius && !matched; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -radius; dx <= radius; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          const q3 = (yy * width + xx) * 3;
+          const dh = Math.abs(cur[q3] - prev[p3]);
+          const hueDiff = Math.min(dh, 255 - dh);
+          const hueWeight = Math.min(cur[q3 + 1], prev[p3 + 1]) / 255;
+          const d = (hueDiff * hueWeight
+            + Math.abs(cur[q3 + 1] - prev[p3 + 1])
+            + Math.abs(cur[q3 + 2] - prev[p3 + 2])) / 3;
+          if (d <= tau) { matched = true; break; }
+        }
+      }
+      if (!matched) changed += 1;
+    }
+  }
+  return changed / n;
+}
+
+/**
+ * 把分数序列做**鲁棒归一化**：z = (s − 滚动中位数) / (IQR / 1.349)。
+ *
+ * 绝对阈值换个内容就得重调（纪录片 15、短视频 30）；z 是"比本片噪声高几倍"，
+ * 与内容无关。IQR/1.349 是正态下的 σ 估计，用分位数代替均值/标准差，对闪光这类离群点免疫。
+ * 直方图法维护分位数，每帧 O(1) 更新，实测 0.004 ms。
+ */
+export function zScores(scores, window = 300, bins = 64) {
+  const n = scores.length;
+  const out = new Float64Array(n);
+  const hist = new Int32Array(bins);
+  const binOf = (v) => Math.max(0, Math.min(bins - 1, Math.floor((v / 256) * bins)));
+  const quant = (frac) => {
+    let total = 0;
+    for (let b = 0; b < bins; b++) total += hist[b];
+    if (total === 0) return 0;
+    const target = Math.max(1, Math.round(frac * total));
+    let acc = 0;
+    for (let b = 0; b < bins; b++) { acc += hist[b]; if (acc >= target) return ((b + 0.5) / bins) * 256; }
+    return 256;
+  };
+  let q25 = 0; let q50 = 0; let q75 = 0;
+  for (let i = 0; i < n; i++) {
+    hist[binOf(scores[i])] += 1;
+    if (i >= window) hist[binOf(scores[i - window])] -= 1;
+    if (i % 5 === 0 || i === n - 1) { q25 = quant(0.25); q50 = quant(0.5); q75 = quant(0.75); }
+    const sigma = Math.max(1, (q75 - q25) / 1.349);
+    out[i] = (scores[i] - q50) / sigma;
+  }
+  return out;
 }
 
 
@@ -396,12 +478,40 @@ export function cutsFromEvents(above, step, { minGap = 0.35, adaptive = true } =
  * @param {{threshold?:number|'auto'|'auto-low', minGap?:number, duration?:number,
  *          adaptiveGap?:boolean}} opts
  */
+/**
+ * 尖峰门：只留"明显高于左右相邻帧"的候选。
+ *
+ * 一次真剪辑是"安静 → 一下 → 安静"；运镜、粒子、字幕只在局部变化，
+ * 邻域里同样是高分，比值上不去。对**快剪**是负收益（邻域本来就吵），所以由调用方按密度门控。
+ *
+ * @param {Array<{t:number, score:number}>} cuts 候选
+ * @param {Array<{t:number, score:number}>} stats 逐帧分数（等间隔）
+ * @param {number} step stats 的时间步长
+ * @param {{k?:number, floor?:number}} o k = 倍数门槛，floor = 分母下限（防邻域为 0 时全通过）
+ */
+export function applySpikeGate(cuts, stats, step, { k = 2.5, floor = 2 } = {}) {
+  if (!Array.isArray(cuts) || cuts.length === 0 || !Array.isArray(stats) || stats.length === 0) return cuts;
+  const at = (i) => (i >= 0 && i < stats.length ? stats[i].score : 0);
+  const t0 = stats[0].t;
+  return cuts.filter((c) => {
+    const i = Math.round((c.t - t0) / step);
+    return at(i) > k * Math.max(floor, at(i - 1), at(i + 1));
+  });
+}
+
 export function decideCuts(stats, {
-  threshold = 'auto', minGap = 0.35, duration, adaptiveGap = true,
+  threshold = 'auto', minGap = 0.35, duration, adaptiveGap = true, floor = MIN_CUT_SCORE,
+  // 尖峰门：候选的分数必须明显高于**左右相邻帧**。真剪辑是"安静 → 一下 → 安静"，
+  // 而运镜/粒子/字幕只在局部动，帧差会被邻域同样高的分数拖住。
+  // 0 = 关闭。注意它对**快剪**是负收益（实测 SHOT 76.4 → 72.6），
+  // 所以只在候选稀疏（≤spikeMaxPerSec）时启用，见下面的门控。
+  spikeK = 0,
+  spikeMaxPerSec = 0.5,
+  spikeFloor = 2,
 } = {}) {
   const scores = stats.map((s) => s.score);
   const used = threshold === 'auto'
-    ? autoThreshold(stats.map((s) => s.raw ?? s.score), { duration })
+    ? autoThreshold(stats.map((s) => s.raw ?? s.score), { duration, floor })
     : threshold === 'auto-low'
       // 保持 4 的低下限（0.5.4 的取法）。试过抬到"本窗 auto 阈值的 1/5"，
       // 结果与直觉相反：门槛一高，留下的刀均分也变高，反而让**更多**窗口过了
@@ -458,7 +568,12 @@ export function decideCuts(stats, {
   const kept = events.filter((c, i) => nearest(i) < 0.15
     || (neighborhoodQuiet(c.t, c.t - 0.18, c.t - 0.06, c.score)
       && neighborhoodQuiet(c.t, c.t + 0.06, c.t + 0.18, c.score)));
-  const cuts = kept;
+  // 尖峰门（按密度门控）：慢节奏素材上它把 BBC 从 89.4 抬到 94.7（留出验证），
+  // 但快剪素材上候选本来就密、邻域也吵，加这道门只会掉召回（SHOT 76.4 → 72.6）。
+  let cuts = kept;
+  if (spikeK > 0 && duration > 0 && kept.length / duration <= spikeMaxPerSec) {
+    cuts = applySpikeGate(kept, stats, step, { k: spikeK, floor: spikeFloor });
+  }
   const hotRatio = stats.length > 0 ? above.length / stats.length : 0;
   // 分数序列的变异系数：区分"每帧一剪"和"匀速运镜"
   const mean = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
@@ -516,7 +631,8 @@ export function scanSummary(scores) {
 /**
  * 扫描整条视频，返回切点与逐帧分数。
  * @param {{input:string, fps:number, ffmpegPath?:string, width?:number, height?:number,
- *          threshold?:number|'auto', minGap?:number, signal?:AbortSignal, onProgress?:Function}} opts
+ *          threshold?:number|'auto', minGap?:number, signal?:AbortSignal, onProgress?:Function,
+ *          hwaccel?:'cuda'|'d3d11va'|null}} opts
  *   threshold='auto' 时按 p95×3 自适应（推荐，真实素材与合成素材都能用）
  * @returns {Promise<{cuts:Array<{t:number,score:number}>, stats:Array<{t:number,score:number}>,
  *                    frames:number, threshold:number}>}
@@ -536,8 +652,27 @@ export function scanShots(opts) {
     start = 0,
     end,
     signal,
+    // 硬件解码（见 hwaccel.js）：只管**连续解码**。null = 软解。
+    // 调用方负责探测（有失败风险），这里不做探测，一次都不多花。
+    hwaccel = null,
     onProgress,
+    // 打分口径：'abs' = 整帧平均差（默认，0–255）；'mc' = 运动补偿后的"变了多少格子"占比 ×255。
+    // 实测 mc 在 SHOT(短视频) 上 71.0→74.4、BBC 上 86.1→89.4（同一套判定）。默认不动。
+    scoreMode = 'abs',
+    mcTau = 15,
+    mcRadius = 2,
+    // 分数做鲁棒归一化（z = 相对本片噪声几倍 σ）。开启后阈值/下限都以 σ 为单位。
+    normalize = false,
+    zWindow = 300,
   } = opts;
+
+  // 判定下限随口径走：abs=12（历史值）、mc=按底噪自适应（见下）、z=10（10 倍噪声）。
+  // 别照搬 abs 的量级：mc 是占比刻度，同一个"看着差不多"的数会让召回拉满、精度崩。
+  // 全 11 集 BBC（照抄 pipeline 推导步骤）实测：40 → 79.8%、60 → 85.2%、**80 → 88.4%**、abs 基线 85.2%。
+  // SHOT 27 段：60 → 77.8%、80 → 77.2%（略降 0.6，换 BBC +3.2，划算）。
+  let minCutScore = opts.minCutScore ?? (normalize === 'z' ? 10 : scoreMode === 'mc' ? 80 : MIN_CUT_SCORE);
+  // 尖峰门默认跟着口径走：mc 下开（2.5×邻域），abs 下不开（abs 上它只值 +1.2，且要重标）。
+  const spikeK = opts.spikeK ?? (scoreMode === 'mc' ? 2.5 : 0);
 
   if (!(fps > 0)) throw new RangeError(`fps must be > 0, got ${fps}`);
   const n = width * height;
@@ -549,6 +684,11 @@ export function scanShots(opts) {
       ['-hide_banner', '-v', 'error', '-nostdin',
         ...(start > 0 ? ['-ss', String(start)] : []),
         ...(end !== undefined ? ['-t', String(Math.max(0.1, end - start))] : []),
+        // **硬件解码必须放在 -i 之前**，且只用顺序解码的场景（见 hwaccel.js 的取舍）。
+        // cuda 会把帧留在显存里，下面的 scale 滤镜由 ffmpeg 自动插 hwdownload —— 实测
+        // 显式写 `hwdownload,format=nv12` 反而会因为 AV1 的 yuv420p 对不上而报
+        // "Impossible to convert between the formats"。
+        ...(hwaccel ? ['-hwaccel', hwaccel] : []),
         // **关掉 h264/hevc 的去块滤波**：扫描只要 64×36 的缩略帧，deblocking 的细节
         // 缩到 1/30 之后完全看不见，却占掉约 17% 的解码时间（实测 3936ms → 3268ms）。
         // 对其它编码器是无害的空操作。
@@ -559,7 +699,7 @@ export function scanShots(opts) {
         // 实测判定结果与 bicubic 相同（伪切点 6 类全 0、召回不变）。
         // （别用 neighbor：点采样会引入大量别名噪声，分数会抖。）
         '-vf', `scale=${width}:${height}:flags=area,format=rgb24`, '-f', 'rawvideo', '-'],
-      { stdio: ['ignore', 'pipe', 'pipe'], signal },
+      { stdio: ['ignore', 'pipe', 'pipe'], signal, windowsHide: true },
     );
 
     let pending = Buffer.alloc(0);
@@ -596,7 +736,10 @@ export function scanShots(opts) {
         frameToHsv(slice, cur);
         const t = start + frame / fps;
         if (hasPrev) {
-          stats.push({ t, score: scorePair(prev, cur) });
+          // mc 口径返回 0–1 占比，×255 是为了让下游（自适应阈值/细扫/护栏）继续在 0–255 量级工作
+          stats.push({ t, score: scoreMode === 'mc'
+            ? mcRatioScore(prev, cur, width, height, { tau: mcTau, radius: mcRadius }) * 255
+            : scorePair(prev, cur) });
         }
         // 长时差：ring[ringIdx] 里躺着 lag 帧之前那一帧
         if (ringWarm >= lag) {
@@ -658,7 +801,20 @@ export function scanShots(opts) {
       const normMeans = bar > 0 ? means.map((m) => m / (1 - bar)) : means;
       const normStats = normalizeScores(stats, means, { barFrac: bar });
       const normLong = normalizeScores(longStats, means, { barFrac: bar, offset: lag });
-      const decided = decideCuts(normStats, { threshold, minGap, duration: span });
+      // **下限跟着本片底噪走**：同样的 80，在安静素材上是"够高"，在颗粒/暗场/常运镜的素材上
+      // 就是"太低"（实测 BBC《Caves》那集 p75=19.7，用 80 时精度只有 62%）。
+      // 用 p75 线性映射（mc 刻度实测标定点：p75≈2.5 → 80；p75≈6.6 → 140），夹在 [80,150]。
+      // 只对 mc 生效；调用方显式传了 minCutScore 就尊重调用方。
+      if (opts.minCutScore == null && scoreMode === 'mc' && normalize !== 'z') {
+        const p75 = quantile(normStats.map((st) => st.score), 0.75);
+        minCutScore = Math.min(150, Math.max(80, Math.round(80 + 14.6 * (p75 - 2.5))));
+      }
+      // 鲁棒归一化：换成"比本片噪声高几倍 σ"的口径（阈值/下限随之改成 σ 单位）
+      if (normalize === 'z') {
+        const z = zScores(normStats.map((st) => st.score), zWindow);
+        for (let i = 0; i < normStats.length; i++) normStats[i].score = z[i];
+      }
+      const decided = decideCuts(normStats, { threshold, minGap, duration: span, floor: minCutScore, spikeK });
       // ---- 渐变转场（叠化/淡入淡出）：补在切点列表里，只补"没有切点的地方"
       const gradual = detectGradual(normLong, normStats, {
         threshold: decided.threshold,
@@ -677,6 +833,7 @@ export function scanShots(opts) {
         threshold: decided.threshold,
         degraded: decided.degraded,
         summary: scanSummary(normStats.map((s) => s.score)),
+        scoring: { mode: scoreMode, normalized: normalize === 'z', minCutScore },
         // 逐帧的亮度均值与 16×9 指纹（供 flash.js / 转场分类用）。
         // 老调用方不读它们也不会受影响。
         means: normMeans,

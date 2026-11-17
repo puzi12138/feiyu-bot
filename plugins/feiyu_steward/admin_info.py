@@ -9,6 +9,7 @@ answers before AstrBot receives a message.
 import copy
 import functools
 import re
+import sys
 from contextlib import aclosing
 
 OWNER = "0"
@@ -217,10 +218,43 @@ class AdminInfoBoundary:
 
     def prepare_admin_info(self, event):
         """Return True after stopping a forbidden administrative command."""
-        # AstrBot removes wake prefixes before the observer runs. Preserve
-        # protection for /status etc. using the transport's original text too.
         texts = (getattr(event, "message_str", ""),
                  getattr(getattr(event, "message_obj", None), "message_str", ""))
+        normalized = [re.sub(r"^(?:大肥鱼|肥鱼|bot)[,，:：\s]*", "",
+                             _CONTROL.sub("", _CQ_AT.sub("", str(text or ""))).strip(),
+                             flags=re.IGNORECASE).strip().rstrip("。！!？? ") for text in texts]
+        command_text = any(_EXACT_COMMAND.fullmatch(text) or _COMMAND_PREFIX.match(text)
+                           for text in normalized)
+        # Native proactive-feed source text is material to comment on, not a
+        # request to administer this host. Explicit or already matched commands
+        # keep the original denial; tool and output ACLs remain unchanged.
+        try:
+            plugin = self.plugin("astrbot_plugin_xiaoheihe_adapter")
+            event_module = sys.modules.get(
+                "data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.event"
+            )
+            handlers = event.get_extra("activated_handlers", None)
+            parsed = event.get_extra("handlers_parsed_params", None)
+            command_types = tuple(getattr(sys.modules.get("astrbot.core.star.filter." + module),
+                                          name, None) for module, name in (
+                ("command", "CommandFilter"), ("command_group", "CommandGroupFilter"),
+                ("regex", "RegexFilter")))
+            if (plugin is not None and event_module is not None
+                    and type(event) is getattr(event_module, "XiaoheiheMessageEvent", None)
+                    and event.get_platform_name() == "xiaoheihe"
+                    and event.runtime is plugin.runtime and not command_text
+                    and isinstance(handlers, list) and isinstance(parsed, dict) and not parsed
+                    and all(isinstance(kind, type) for kind in command_types)
+                    and all(isinstance(getattr(handler, "event_filters", None), list)
+                            and all(not isinstance(item, command_types)
+                                    for item in handler.event_filters) for handler in handlers)):
+                binding = plugin._automatic_binding(event)
+                if binding[1] == "proactive_feed" and event.proactive is True:
+                    return False
+        except Exception:
+            pass
+        # AstrBot removes wake prefixes before the observer runs. Preserve
+        # protection for /status etc. using the transport's original text too.
         if owner_private(event) or not any(admin_info_request(text) for text in texts):
             return False
         _extra(event, "feiyu_admin_info_block", "owner_private_admin_only")

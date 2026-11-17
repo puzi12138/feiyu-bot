@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from . import feiyu_recovery
 from . import feiyu_unseen_feed
+from . import feiyu_own_comments
 
 import hashlib
 import math
@@ -201,6 +202,7 @@ async def _initialize(connection, current_id, day, start, end, initialized_at):
         event_type TEXT NOT NULL, day TEXT NOT NULL, reserved_at REAL NOT NULL,
         dispatched_at REAL, send_started_at REAL, send_blocked INTEGER NOT NULL DEFAULT 0,
         revoked INTEGER NOT NULL DEFAULT 0)""")
+    await feiyu_own_comments.initialize(connection)
     existing = await _one(connection, """SELECT legacy_day,legacy_count,initialized_at,
         legacy_reply_count FROM feiyu_auto_reply_meta WHERE id=1""")
     if existing is not None:
@@ -450,7 +452,8 @@ async def usage(repository, *, now=None):
         return {"available": False, "limit": DAILY_LIMIT, "used": None}
 
 
-async def reserve(repository, event_id, notification, *, now=None, daily_limit=DAILY_LIMIT):
+async def reserve(repository, event_id, notification, *, now=None, daily_limit=DAILY_LIMIT,
+                  own_comment_service=None):
     """Reserve one opportunity before context/vision/compression/main models.
 
     A completed or unknown native outgoing is left intact for reconciliation.
@@ -486,6 +489,7 @@ async def reserve(repository, event_id, notification, *, now=None, daily_limit=D
                                                    event_id=event_id, route=notification.route)):
                 return False, "period_not_allowed", False
             return recovery
+        own_scope = False
         async with repository.db.transaction() as connection:
             day, start, end, stamp = _clock(now)
             if kind == "proactive_feed" and not await feiyu_unseen_feed.valid(
@@ -517,11 +521,23 @@ async def reserve(repository, event_id, notification, *, now=None, daily_limit=D
             # BEGIN IMMEDIATE transaction that establishes ordinary authority.
             if await feiyu_unseen_feed.manual_outgoing_blocked(connection, profile, post):
                 return False, "manual_post_preserved", False
-            if await _one(connection, "SELECT 1 FROM feiyu_auto_reply_posts WHERE post_hash=?", (key,)):
+            own_uid = (feiyu_own_comments.candidate(own_comment_service, notification)
+                       if own_comment_service is not None else None)
+            if own_uid:
+                own_plan, reason = await feiyu_own_comments.reserve_scope(
+                    connection, own_comment_service, event_id, notification, key)
+                if own_plan is None:
+                    return False, reason, False
+                key = own_plan["scope_hash"]
+                own_scope = True
+            elif (own_comment_service is not None
+                  and feiyu_own_comments.definitely_own(own_comment_service, notification)):
+                return False, "own_comment_identity_unverified", False
+            elif await _one(connection, "SELECT 1 FROM feiyu_auto_reply_posts WHERE post_hash=?", (key,)):
                 return False, "post_already_processed", False
             # Preserve detection of preexisting writes that may have been
             # created by a pipeline already in flight during initialization.
-            previous_post = await _one(connection, """
+            previous_post = None if own_scope else await _one(connection, """
                 SELECT 1 FROM outgoing_replies o LEFT JOIN incoming_events e ON e.id=o.incoming_event_id
                  WHERE o.post_id=? AND o.incoming_event_id IS NOT NULL AND o.incoming_event_id<>?
                    AND (e.id IS NULL OR e.event_type IN ('reply','mention','proactive_feed'))
@@ -543,6 +559,8 @@ async def reserve(repository, event_id, notification, *, now=None, daily_limit=D
                 route=notification.route,
             ):
                 return False, "period_not_allowed", False
+            if own_scope:
+                await feiyu_own_comments.commit_scope(connection, event_id, own_plan)
             await connection.execute("INSERT INTO feiyu_auto_reply_posts VALUES (?, 'reservation')", (key,))
             await connection.execute("""INSERT INTO feiyu_auto_reply_reservations
                 (event_id,post_hash,profile_id,event_type,day,reserved_at) VALUES (?,?,?,?,?,?)""",
@@ -553,6 +571,8 @@ async def reserve(repository, event_id, notification, *, now=None, daily_limit=D
         if not _current_period_allowed(kind, day, now=now, repository=repository,
                                        event_id=event_id, route=notification.route):
             return False, "period_not_allowed", False
+        if own_scope:
+            feiyu_own_comments.bind(repository, event_id, own_comment_service, day)
         return True, "reserved", False
     except Exception:
         return False, "gate_unavailable", True
@@ -561,6 +581,7 @@ async def reserve(repository, event_id, notification, *, now=None, daily_limit=D
 async def block_event(repository, event_id, reason):
     """Irrevocably stop active work without altering a send or old queue."""
     revoke_event(repository, event_id)
+    feiyu_own_comments.unbind(repository, event_id)
     try:
         async with repository.db.transaction() as connection:
             table = await _one(connection, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='feiyu_auto_reply_reservations'")
@@ -609,6 +630,11 @@ async def authorize(repository, event_id, route, *, phase, now=None):
                 connection, meta["legacy_day"], meta["legacy_count"],
                 meta["initialized_at"], meta["legacy_reply_count"], day,
             )
+            scoped, scoped_key = await feiyu_own_comments.resolve_scope(
+                connection, repository, event_id, route, key)
+            if scoped and scoped_key is None:
+                return False
+            key = scoped_key
             row = await _one(connection, """SELECT r.post_hash,r.profile_id,r.event_type,r.day,
                 r.dispatched_at,r.send_started_at,r.send_blocked,r.revoked,e.profile_id AS event_profile,
                 e.post_id AS event_post,e.event_type AS actual_type,e.status AS event_status,p.source AS post_source

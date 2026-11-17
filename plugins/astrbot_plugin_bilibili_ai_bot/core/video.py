@@ -5,6 +5,8 @@ import base64
 import json
 import re
 import shutil
+import hashlib
+import uuid
 from .video_diagnostics import media_failure, get_call_diagnostic, set_call_diagnostic, exception_detail, safe_detail
 from datetime import datetime
 from astrbot.api import logger
@@ -517,6 +519,10 @@ class VideoMixin:
         """Serialize by BV and persist content before another entry can re-analyze."""
         bvid = str(video_info.get("bvid", "") or "")
         async with self._video_analysis_lock(bvid):
+            # A reused memory is not a fresh public-media analysis, including
+            # legacy semantic memories that may also contain private evaluation.
+            video_info.pop("_public_media_provenance", None)
+            video_info.pop("_analysis_from_cache", None)
             if bvid and not video_info.get("_force_rewatch"):
                 cached = self._cached_video_memory(bvid)
                 if cached:
@@ -534,6 +540,14 @@ class VideoMixin:
                     return "曾经看过该视频，细节已经淡忘；本次仅读取观看痕迹，没有重新分析。"
             result = await self._analyze_video_with_vision_inner(video_info)
             if result and bvid:
+                if video_info.get("analysis_basis") == "video_media":
+                    # Mint only after the public media/subtitle/comment merge,
+                    # before any owner-memory-based evaluation is performed.
+                    video_info["_public_media_provenance"] = {
+                        "version": 1, "analysis_id": uuid.uuid4().hex,
+                        "source": "native_public_video_analysis", "bvid": bvid,
+                        "sha256": hashlib.sha256(result.encode("utf-8")).hexdigest(),
+                    }
                 cache = self._load_json(VIDEO_MEMORY_FILE, {})
                 cache[bvid] = {
                     "bvid": bvid, "title": video_info.get("title", ""),
@@ -547,6 +561,8 @@ class VideoMixin:
                     "content_analyzed": video_info.get("analysis_basis") != "metadata",
                     "source": "video_analysis",
                 }
+                if video_info.get("_public_media_provenance"):
+                    cache[bvid]["public_media_provenance"] = dict(video_info["_public_media_provenance"])
                 self._save_json(VIDEO_MEMORY_FILE, cache)
             return result
 

@@ -38,6 +38,30 @@ const cutRange = (segments, from, to) => (Array.isArray(segments) ? segments : [
   .filter((s) => Number(s.to) > from && Number(s.from) < to);
 
 /**
+ * 站点字幕没拿到、又不会跑 ASR 时，`source` 该写什么（纯函数，好测）。
+ *
+ * `no-key` 的含义是"**没尝试**"（没配 ASR）。而 `no-ytdlp` / `failed` 是"**尝试了、但抓字幕
+ * 这一步坏了**"—— 两者对用户是完全相反的动作：一个去配听音服务，一个去修 yt-dlp。
+ * 以前它们长得一模一样，只能靠猜（issue #86）。
+ *
+ * `no-subs` 不算坏：那确实是"这条片子没有站点字幕"，写 `no-key` 是对的。
+ *
+ * @param {{remote?:{ok?:boolean,reason?:string,detail?:string}|null, willTranscribe?:boolean}} o
+ * @returns {{source:string, reason?:string, detail?:string}|null} `null` = 交给 ASR，别下结论
+ */
+export function subtitleMissSource({ remote = null, willTranscribe = false } = {}) {
+  if (willTranscribe) return null;
+  if (remote && !remote.ok && (remote.reason === 'no-ytdlp' || remote.reason === 'failed')) {
+    return {
+      source: 'subtitle-failed',
+      reason: String(remote.reason),
+      ...(remote.detail ? { detail: String(remote.detail).slice(0, 300) } : {}),
+    };
+  }
+  return { source: 'no-key' };
+}
+
+/**
  * 这一窗口的字从哪来（**决定，不扫图、不取帧**）。
  *
  * @returns {Promise<{transcriptInfo:object|null, textInSilence:number,
@@ -47,11 +71,11 @@ export async function resolveTranscript({
   input, info, sourceInfo = null, fetchOptions = null,
   transcript = 'auto', transcriptFile = null,
   winStart = 0, winDur = 0, silences = [],
-  ffmpegPath, hotwords, asrKey, asrMaxChunk = 45, cache = true,
+  ffmpegPath, hotwords, asrKey, asrMaxChunk = 45, cache = true, hostAsr = null,
 }) {
-  // 这次调用到底会不会真的转写：云端没配 key 只是"跳过"的其中一种，本机服务不需要 key。
-  // 判据必须和 `transcribe()` 的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
-  const willTranscribe = () => canTranscribe(resolveAsrConfig(), asrKey);
+  // 这次调用到底会不会真的转写：宿主 speechToText / 本机 HTTP 服务 / 云端 key 都算。
+  // 判据必须和实际要走的门同源（见 asr.js 的 canTranscribe），否则清单会和实际行为相反。
+  const willTranscribe = () => Boolean(hostAsr) || canTranscribe(resolveAsrConfig(), asrKey);
   let transcriptInfo = null;
   // 站点有字幕轨但要登录 —— 清单要说明"现在用的是 ASR，不是这视频没字幕"
   let subtitleNeedsLogin = false;
@@ -97,6 +121,14 @@ export async function resolveTranscript({
       // 有字幕但要登录：这个事实必须让用户看到，否则会以为"这视频没字幕"
       subtitleNeedsLogin = true;
     }
+    /**
+     * **抓字幕这一步自己坏了**（跟"这视频没字幕"是两件事）。
+     *
+     * `fetchOnce` 的四种 reason 里，只有 `needs-login` 以前会被单独提示；
+     * `no-ytdlp` / `failed` 全都一路掉到 `no-key`，而 `no-key` 的含义是
+     * "没配 ASR、压根没尝试转写" —— 用户看到它就去配 ASR，方向完全错（issue #86）。
+     * 判定收在 `subtitleMissSource()` 里（纯函数，单测直接咬）。
+     */
     if (subtitle) {
       transcriptInfo = {
         segments: subtitle,
@@ -107,7 +139,7 @@ export async function resolveTranscript({
       // 压根不会转写（云端没配 key）—— 跟"跑了但没听懂"是两码事。
       // 旧代码走的是 withCache → null 空壳 → asr.empty → 'asr-empty'，清单于是写
       // "ASR ran and found no speech here"，一个字都没听过却说"这片子没人说话"。
-      transcriptInfo = { segments: [], source: 'no-key' };
+      transcriptInfo = { segments: [], ...subtitleMissSource({ remote, willTranscribe: false }) };
     } else {
       try {
         // 切片调用：单次请求过长会让时间码整体压早（实测 299s 压早 13s）。
@@ -119,10 +151,13 @@ export async function resolveTranscript({
         // 前缀 `asr2|` 让旧缓存（以及 transcript-cache 里的旧后端身份）自然作废，不需要用户手清。
         const asrCfg = resolveAsrConfig();
         const asrHotwords = hotwords !== undefined ? hotwords : asrCfg.hotwords;
-        const asrBackend = asrBackendId({
-          baseUrl: asrCfg.baseUrl, model: asrCfg.model, language: asrCfg.language,
-          maxChunk: asrMaxChunk, transcript, hotwords: asrHotwords,
-        });
+        // 宿主本地 provider 与云端 HTTP 必须使用不同缓存身份，否则会串用彼此的句子。
+        const asrBackend = hostAsr
+          ? `asr2|host:speechToText|${asrCfg.language}|${asrMaxChunk}`
+          : asrBackendId({
+            baseUrl: asrCfg.baseUrl, model: asrCfg.model, language: asrCfg.language,
+            maxChunk: asrMaxChunk, transcript, hotwords: asrHotwords,
+          });
         const asrCacheKey = await cacheKey({
           input, start: winStart, end: winStart + winDur, threshold: asrBackend,
         });
@@ -135,7 +170,7 @@ export async function resolveTranscript({
           : null;
         // 本地 ASR 可能要临时拉起（用完就停）—— 只在 asr.json 配了 manage.start 时才托管。
         // 命中按片缓存时**不拉起**：省一次模型加载，也不会白占几 GB。
-        if (!covered) {
+        if (!covered && !hostAsr) {
           // `spawnImpl` 不要在这里传：这个文件从来没导入过 spawn，
           // 传 `spawnImpl: spawn` 等于每跑一次就 ReferenceError 一次，被下面的 catch 吞成
           // "asr-failed · spawn is not defined" —— 转写于是永远是空的。默认值在 asr-lifecycle 里。
@@ -147,13 +182,18 @@ export async function resolveTranscript({
         const asrStart = Date.now();
         const asr = covered
           ? { segments: covered.segments, empty: covered.segments.length === 0, cached: true }
-          : await withCache(asrCacheKey, () => transcribeLong({
-            input, ffmpegPath, start: winStart, end: winStart + winDur,
-            // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
-            silences, maxChunk: asrMaxChunk, apiKey: asrKey,
-            // 显式传解析后的值：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
-            hotwords: asrHotwords, language: asrCfg.language,
-          }), { enabled: cache });
+          : await withCache(asrCacheKey, () => (hostAsr
+            ? hostAsr({
+              input, ffmpegPath, start: winStart, end: winStart + winDur,
+              silences, maxChunk: asrMaxChunk, language: asrCfg.language,
+            })
+            : transcribeLong({
+              input, ffmpegPath, start: winStart, end: winStart + winDur,
+              // apiKey 必须传：否则关掉 ASR 只能靠"没 key"，而本机服务不需要 key
+              silences, maxChunk: asrMaxChunk, apiKey: asrKey,
+              // 显式传解析后的值：不传的话 transcribe 会再解析一次，键和实参可能不是同一份
+              hotwords: asrHotwords, language: asrCfg.language,
+            })), { enabled: cache });
         asrSeconds = covered ? 0 : +((Date.now() - asrStart) / 1000).toFixed(1);
         asrCached = asr?.cached === true;
         if (asr && !covered && cache && asr.segments?.length) {
@@ -186,7 +226,7 @@ export async function resolveTranscript({
           segments: [],
           source: 'asr-failed',
           // 把真实原因带出来 —— 只写 "ASR call failed" 会让每次故障都得重新猜
-          error: `${explainFetchError(error).slice(0, 300)}  [${describeAsrTarget()}]`,
+          error: `${explainFetchError(error).slice(0, 300)}  [${hostAsr ? 'host speechToText' : describeAsrTarget()}]`,
         };
       }
     }
@@ -248,9 +288,29 @@ export async function prefetchTranscript({
   }
 
   // 2) 本地媒体（页面 URL 会在这里下载/复用，和画面轨同一个 mediaKey）
-  const { path: media } = await resolveInput(input, fetchOptions ?? {});
+  // cookies 是 prefetch 的独立参数（站点 CC 已经用了）；下载也要用它，否则登录片在
+  // 这一步退成匿名请求，可能直接失败或拿到低清源。
+  const fetchOpts = { ...(fetchOptions ?? {}) };
+  if (cookies) fetchOpts.cookies = cookies;
+  const { path: media } = await resolveInput(input, fetchOpts);
   const info = await probeVideo(media, { ffprobePath });
   if (!info.hasAudio) return done({ ok: false, source: 'no-audio', segments: [], reason: 'no-audio' });
+
+  // 3) 内嵌字幕：和 resolveTranscript 同一级（站点 CC → 内嵌字幕 → 缓存 → ASR）。
+  // 以前这里直接跳去 canTranscribe()，本地带字幕的片子因此在没有 ASR key 时被误报 no-key。
+  if (info.hasSubtitle) {
+    const subtitle = await extractSubtitleTrack({ input: media, ffmpegPath }).catch(() => null);
+    if (subtitle) {
+      const segs = cutRange(subtitle, start, end);
+      return done({
+        ok: segs.length > 0,
+        source: 'subtitle',
+        segments: segs,
+        cached: false,
+        ...(segs.length > 0 ? {} : { reason: 'subtitle-empty' }),
+      });
+    }
+  }
 
   const asrCfg = resolveAsrConfig();
   if (!canTranscribe(asrCfg, asrKey)) {

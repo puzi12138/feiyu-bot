@@ -1,5 +1,10 @@
 param([switch]$SkipQQConnection,[switch]$AutomaticServiceRecovery)
 $ErrorActionPreference = 'Stop'
+# Keep this guard before pause-marker, environment, config or service mutations.
+. "$PSScriptRoot\IndependentStartup.Common.ps1"
+if (Invoke-QQBotIndependentStartup -ScriptPath $PSCommandPath -SkipQQConnection:$SkipQQConnection -AutomaticServiceRecovery:$AutomaticServiceRecovery) { return }
+$startupLease = Enter-QQBotStartupLease -Root (Split-Path $PSScriptRoot -Parent)
+try {
 $Root = Split-Path $PSScriptRoot -Parent
 if ($AutomaticServiceRecovery) {
     if (Test-Path -LiteralPath "$Root\run\services-paused") { return }
@@ -56,6 +61,13 @@ Write-Host 'AstrBot: http://127.0.0.1:6185   SnowLuma: http://127.0.0.1:5099'
 if (Test-Path -LiteralPath "$PSScriptRoot\StartCodexBrief.ps1") {
     & "$PSScriptRoot\StartCodexBrief.ps1"
 }
+if (Test-Path -LiteralPath "$PSScriptRoot\StartCodexFaultRelay.ps1") {
+    try {
+        & "$PSScriptRoot\StartCodexFaultRelay.ps1"
+    } catch {
+        Write-Warning 'Codex fault relay startup needs attention; inspect its protected runtime records before another start.'
+    }
+}
 if (!$SkipQQConnection -and (Test-Path -LiteralPath "$Root\config\qq-client.json")) {
     try {
         & "$PSScriptRoot\ConnectQQ.ps1"
@@ -100,4 +112,9 @@ if (Test-Path -LiteralPath "$PSScriptRoot\BusinessHealth.Common.ps1") {
         . "$PSScriptRoot\BusinessHealth.Common.ps1"
         Invoke-BusinessHealthCheck -Root $Root
     } catch { Write-Warning 'Business health check unavailable; original startup result is unchanged.' }
+}
+
+} finally {
+    $startupLease.ReleaseMutex()
+    $startupLease.Dispose()
 }

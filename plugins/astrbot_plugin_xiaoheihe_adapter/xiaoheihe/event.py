@@ -10,6 +10,8 @@ from astrbot.api.message_components import Plain
 from astrbot.api.platform import AstrBotMessage, PlatformMetadata
 
 from .models import RoutingTarget
+from .feiyu_auto_reply_gate import block_event
+from .feiyu_own_comments import is_own_comment_event, SKIP_MARKER
 from .runtime import RuntimeServices
 
 CONTROL_MESSAGE_TYPES = frozenset(
@@ -177,6 +179,13 @@ class XiaoheiheMessageEvent(AstrMessageEvent):
                 self.runtime.report_segmented_reply_aggregated(self.route.profile_id)
             generated_ms = max(0, int((time.perf_counter() - self._started_at) * 1000))
             try:
+                if SKIP_MARKER in text and await is_own_comment_event(
+                    self.runtime.repository, self.event_id, self.route,
+                ):
+                    # A deliberate interest skip is a consumed opportunity, not
+                    # a model failure, an outgoing comment or a retry request.
+                    await block_event(self.runtime.repository, self.event_id, "own_comment_not_interesting")
+                    return
                 if not text:
                     await self.runtime.fail_reply(
                         event_id=self.event_id,

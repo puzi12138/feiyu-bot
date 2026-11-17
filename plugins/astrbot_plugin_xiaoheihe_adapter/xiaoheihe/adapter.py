@@ -377,6 +377,9 @@ class XiaoheihePlatformAdapter(Platform):
                 )
                 if await wait_feed_delay(self, feed, max(300, interval)):
                     continue
+                # Preserve wake cleanup when stop/refresh ended the error wait.
+                consume_ready_wake(self, feed)
+                continue
             if consume_ready_wake(self, feed):
                 continue
             jitter_ms = secrets.randbelow(max(0, jitter) * 1000 + 1)
@@ -554,32 +557,33 @@ class XiaoheihePlatformAdapter(Platform):
 
     async def _dispatch_synthetic(
         self, notification: Notification, metadata: dict[str, Any]
-    ) -> None:
+    ) -> bool:
+        """Return whether a native event was claimed, never a delivery receipt."""
         runtime = get_runtime()
         if self._context_builder is None:
-            return
+            return False
         if "_feiyu_recovery_event_id" in metadata:
             event_id = await feiyu_recovery.claimed_event(runtime.repository, notification, metadata)
         else:
             event_id = await runtime.repository.claim_event(notification)
         if event_id is None:
-            return
+            return False
         with candidate_scope(self, notification, event_id):
             allowed, reason, preserve = await reserve(runtime.repository, event_id, notification)
             if not allowed:
                 if not preserve:
                     await block_event(runtime.repository, event_id, reason)
-                return
+                return True
             try:
                 client = await runtime.get_client(notification.profile_id)
                 if not await authorize(runtime.repository, event_id, notification.route, phase="context"):
                     await block_event(runtime.repository, event_id, "context_not_authorized")
-                    return
+                    return True
 
                 async with processing_scope(self, notification, event_id) as permitted:
                     if not permitted:
                         await block_event(runtime.repository, event_id, "fresh_retry_not_authorized")
-                        return
+                        return True
                     async def context_authorized() -> bool:
                         return await authorize(runtime.repository, event_id, notification.route, phase="context")
 
@@ -606,13 +610,14 @@ class XiaoheihePlatformAdapter(Platform):
                     )
             except RequestNotAuthorized:
                 await block_event(runtime.repository, event_id, "context_not_authorized")
-                return
+                return True
             except asyncio.CancelledError:
                 await block_event(runtime.repository, event_id, "processing_cancelled")
                 raise
             except Exception:
                 await block_event(runtime.repository, event_id, "processing_failed")
                 raise
+        return True
 
     async def send_by_session(self, session: MessageSession, message_chain: MessageChain) -> None:
         # A generic proactive send has no proven owner intent or reservation.

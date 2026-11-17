@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from importlib import import_module
 from pathlib import Path
 from .peak_bridge import automatic_bili_allowed, manual_bili_request, peak_active
+from .network import FollowingReadPaused
 from .video_diagnostics import evaluation_failure, get_call_diagnostic, set_call_diagnostic, exception_detail
 from datetime import datetime, timedelta
 from astrbot.api import logger
@@ -819,6 +820,68 @@ class ProactiveMixin:
                 break
         return queries
 
+    def _following_related_search_queries(self, following_mids, videos, watch_log=None):
+        """Derive bounded related searches only from current-follow evidence."""
+        followed = {str(mid) for mid in following_mids}
+        queries = []
+
+        def add(value):
+            if not isinstance(value, str):
+                return
+            # Keep an actual metadata/tag phrase; never invent a topic or execute
+            # video text as an instruction to the selection model.
+            value = re.sub(r"<[^>]+>", "", value)
+            value = re.sub(r"\s+", " ", value).strip()
+            if not value or len(value) > 40:
+                return
+            if any(ord(char) < 32 for char in value):
+                return
+            if re.search(r"https?://|b23\.tv|BV[0-9A-Za-z]+", value, re.IGNORECASE):
+                return
+            if value not in queries:
+                queries.append(value)
+
+        # Recent positive memory tags must belong to a currently followed UP
+        # and an actually analyzed video, rather than global old preferences.
+        history = watch_log if isinstance(watch_log, list) else []
+        for entry in reversed(self._recent_taste_entries(history)):
+            if not isinstance(entry, dict) or str(entry.get("up_mid", "")) not in followed:
+                continue
+            summary = entry.get("content_summary")
+            if not re.fullmatch(r"BV[0-9A-Za-z]{10}", str(entry.get("bvid") or "")) or not isinstance(summary, str) or not summary.strip():
+                continue
+            if entry.get("analysis_basis") not in {"video_media", "subtitles"}:
+                continue
+            try:
+                if not 7 <= float(entry.get("score", 0) or 0) <= 10:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            keywords = entry.get("search_keywords")
+            for value in (keywords if isinstance(keywords, list) else [])[:5]:
+                add(value)
+            signals = entry.get("preference_signals")
+            for signal in (signals if isinstance(signals, list) else [])[:5]:
+                if isinstance(signal, dict) and signal.get("polarity") in {"like", "curious"}:
+                    add(signal.get("value"))
+            add(entry.get("tname"))
+            if len(queries) >= 3:
+                return queries[:3]
+
+        # The UP API already supplied this metadata during this round. Seen
+        # latest videos can still anchor related fields without being rewatched.
+        for video in videos:
+            if str(video.get("up_mid", "")) not in followed or not re.fullmatch(r"BV[0-9A-Za-z]{10}", str(video.get("bvid") or "")):
+                continue
+            tags = video.get("tags")
+            for value in (tags if isinstance(tags, list) else [])[:5]:
+                add(value)
+            add(video.get("tname"))
+            add(video.get("title"))
+            if len(queries) >= 3:
+                break
+        return queries[:3]
+
     async def _decide_proactive_search_queries(self, watch_log=None):
         """从观看证据选词，并给新方向保留实际候选位置。"""
         history = watch_log if isinstance(watch_log, list) else self._load_json(WATCH_LOG_FILE, [])
@@ -1557,6 +1620,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             else 0
         )
         candidate_target = daily_watch + max(3, prefilter_extra)
+        following_first = _AUTO_BROWSE.get() is True and self._interest_driven_enabled()
         today_source_counts = {"follow": 0, "search": 0, "pool": 0}
         for entry in today_watched:
             source = self._proactive_log_source(entry.get("source"))
@@ -1566,6 +1630,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             daily_watch,
             today_source_counts,
         )
+        if following_first:
+            source_quotas = {"follow": daily_watch, "search": 0, "pool": 0}
         logger.info(
             "[BiliBot] 🧭 今日已看来源=%s/%s/%s | 本轮配额：关注=%s 搜索=%s 视频池=%s",
             today_source_counts["follow"],
@@ -1576,14 +1642,28 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             source_quotas["pool"],
         )
 
-        # 关注候选：特别关注优先，其后从普通关注中找今天更新的视频。
+        # Interest browsing prefers unseen latest followed videos, including
+        # older uploads; the existing manual/fixed-schedule day filter stays.
         follow_candidates = []
         follow_seen = set()
+        following_evidence = []
         special_mids = self.config.get("PROACTIVE_FOLLOW_UIDS", [])
+        if _auto_browse_paused():
+            return
+        try:
+            following_mids = await self.get_followings()
+        except FollowingReadPaused:
+            return  # Normal local rest; never classify it as a platform failure.
+        current_following_mids = tuple(following_mids)
+        if following_first:
+            followed = {str(mid) for mid in current_following_mids}
+            special_mids = [mid for mid in special_mids if str(mid) in followed]
         for mid in special_mids:
             if _auto_browse_paused():
                 return
             video = await self._get_up_latest_video(mid)
+            if video:
+                following_evidence.append(video)
             if video and video["bvid"] not in watched_bvids and video["bvid"] not in follow_seen:
                 follow_seen.add(video["bvid"])
                 follow_candidates.append(self._tag_video_source(video, "follow", "special_follow"))
@@ -1592,10 +1672,12 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 break
         if _auto_browse_paused():
             return
-        following_mids = await self.get_followings()
         logger.info(f"[BiliBot] 📡 关注列表：{len(following_mids)} 个UP主")
         following_mids = [mid for mid in following_mids if str(mid) not in {str(v) for v in special_mids}]
         random.shuffle(following_mids)
+        # Sample the complete list without growing the former 50-UP scan.
+        # All followed UPs can enter later rounds; no cursor or extra task.
+        following_mids = following_mids[:50]
         today = datetime.now().date()
         for mid in following_mids:
             if _auto_browse_paused():
@@ -1604,6 +1686,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 break
             video = await self._get_up_latest_video(mid)
             await asyncio.sleep(random.uniform(0.5, 1.5))
+            if video:
+                following_evidence.append(video)
             if video and video["bvid"] not in watched_bvids and video["bvid"] not in follow_seen:
                 pubdate = video.get("pubdate", 0)
                 if isinstance(pubdate, str):
@@ -1611,15 +1695,15 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                         pubdate = int(pubdate)
                     except Exception:
                         pubdate = 0
-                if pubdate and datetime.fromtimestamp(pubdate).date() == today:
+                if following_first or (pubdate and datetime.fromtimestamp(pubdate).date() == today):
                     follow_seen.add(video["bvid"])
                     follow_candidates.append(self._tag_video_source(video, "follow", "following"))
-                    logger.info(f"[BiliBot] 🔔 今日更新：{video['up_name']} - {video['title']}")
+                    logger.info(f"[BiliBot] 🔔 关注候选：{video['up_name']} - {video['title']}")
 
         # 视频池候选：保留现有热门/推荐/排行/最新等地址池配置。
         if _auto_browse_paused():
             return
-        pool_videos = await self._get_pool_videos(min_pubdate_hot)
+        pool_videos = [] if following_first else await self._get_pool_videos(min_pubdate_hot)
         pool_candidates = [
             self._tag_video_source(video, "pool")
             for video in pool_videos
@@ -1633,11 +1717,20 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             or len(follow_candidates) < source_quotas["follow"]
             or len(pool_candidates) < source_quotas["pool"]
         )
+        if following_first:
+            # Keep a bounded spare set for the existing later self/retry/
+            # reservation filters; never re-search after an ineligible item.
+            need_search_candidates = len(follow_candidates) < candidate_target
         search_candidates = []
         if need_search_candidates:
             if _auto_browse_paused():
                 return
-            search_keywords = await self._decide_proactive_search_queries(watch_log)
+            if following_first:
+                search_keywords = self._following_related_search_queries(
+                    current_following_mids, following_evidence, watch_log,
+                )
+            else:
+                search_keywords = await self._decide_proactive_search_queries(watch_log)
             if _auto_browse_paused():
                 return
             raw_search_videos = await self._get_proactive_search_videos(
@@ -1652,8 +1745,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
             ]
 
         # 历史口味仅用于生成搜索词和标题筛选，不再单独占第四种来源。
-        taste_tids = self._get_taste_tids()
-        if not taste_tids:
+        taste_tids = [] if following_first else self._get_taste_tids()
+        if not taste_tids and not following_first:
             taste_tids = list(self.FALLBACK_TIDS)
             logger.info("[BiliBot] 🎯 口味数据不足，使用兜底分区")
         candidates = {
@@ -1663,7 +1756,7 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
         }
         unique = self._merge_proactive_source_candidates(
             candidates,
-            source_quotas,
+            {"follow": candidate_target, "search": 0, "pool": 0} if following_first else source_quotas,
             candidate_target,
         )
         selected_counts = {
@@ -2018,6 +2111,9 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                 log_entry["storyboard_segments_used"] = analysis_info.get("_storyboard_segments_used", 0)
                 log_entry["storyboard_segments_total"] = analysis_info.get("_storyboard_segments_total", 0)
                 log_entry["analysis_coverage"] = analysis_info.get("analysis_coverage", "existing_media")
+                if analysis_info.get("_public_media_provenance"):
+                    log_entry["content_analyzed"] = analysis_info.get("analysis_basis") == "video_media"
+                    log_entry["public_media_provenance"] = dict(analysis_info["_public_media_provenance"])
             watch_log.append(log_entry)
             watch_log = self._append_json_list(WATCH_LOG_FILE, watch_log.pop(), cap=200)
             recommended_by_private_message = "✉️私信推荐给主人" in actions
@@ -2082,6 +2178,8 @@ recommend_owner判断：你真的喜欢、惊讶、被逗笑或发现有意思�
                     "storyboard_segments_used": analysis_info.get("_storyboard_segments_used", 0),
                     "storyboard_segments_total": analysis_info.get("_storyboard_segments_total", 0),
                 }
+                if analysis_info.get("_public_media_provenance"):
+                    vc[bvid]["public_media_provenance"] = dict(analysis_info["_public_media_provenance"])
                 self._save_json(VIDEO_MEMORY_FILE, vc)
                 queued = _enqueue_successful_automatic_watch(bvid, log_entry["time"])
                 if _retry_attempt is not None:

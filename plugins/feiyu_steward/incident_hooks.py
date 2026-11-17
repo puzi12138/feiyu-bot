@@ -10,8 +10,10 @@ already dispatched network operation cannot be recalled.
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import builtins
 import functools
+import hashlib
 import inspect
 import json
 import math
@@ -24,6 +26,7 @@ from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 
 from .failure_diagnostics import record_failure
+from .new_content_retry import _key_hash, content_hash
 
 
 _SYNC_AUTOMATIC = ContextVar("feiyu_incident_qzone_sync", default=False)
@@ -43,6 +46,7 @@ _HEYBOX_MODEL_EXCEPTION = ContextVar("feiyu_incident_model_exception", default=N
 _ABSENT = object()
 _ACTIVE_INCIDENT_HOOKS = None
 _HEYBOX_API_MODULE = "data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.api_client"
+_BILI_API_MODULE = "data.plugins.astrbot_plugin_bilibili_ai_bot.core.bilibili"
 _HEYBOX_API_CATEGORIES = {
     "send_unknown": "delivery_unknown",
     "credential_invalid": "credential_invalid",
@@ -54,6 +58,7 @@ _HEYBOX_API_CATEGORIES = {
     "upstream_rejected": "request_rejected",
     "response_shape": "response_invalid",
     "platform_content_rejected": "platform_content_rejected",
+    "platform_target_deleted": "request_rejected",
 }
 
 # Fixed result codes only.  Empty results, ordinary policy/interest skips and
@@ -146,10 +151,14 @@ def _heybox_api_category(error):
     if (isinstance(rejected, type) and rejected.__module__ == _HEYBOX_API_MODULE
             and any(item is rejected for item in mro)):
         return "platform_content_rejected"
+    deleted = getattr(module, "PlatformTargetDeletedError", None)
+    if (isinstance(deleted, type) and deleted.__module__ == _HEYBOX_API_MODULE
+            and any(item is deleted for item in mro)):
+        return "platform_target_deleted"
     category = getattr(error, "category", None)
     # Content rejection is definitive only for the adapter's dedicated class;
     # a category string on an unrelated or generic exception cannot assert it.
-    if category == "platform_content_rejected":
+    if category in {"platform_content_rejected", "platform_target_deleted"}:
         return None
     return category if type(category) is str and category in _HEYBOX_API_CATEGORIES else None
 
@@ -206,9 +215,24 @@ def _category(error):
             or any((base.__module__, base.__name__) in _IGNORED_EXCEPTIONS
                    for base in type(error).__mro__)):
         return None
+    bili_module = sys.modules.get(_BILI_API_MODULE)
+    bili_error = getattr(bili_module, "FollowingReadError", None)
+    if (isinstance(bili_error, type) and bili_error.__module__ == _BILI_API_MODULE
+            and type(error) is bili_error):
+        category = getattr(error, "category", None)
+        if type(category) is str and category in {
+                "credential_invalid", "access_denied", "rate_limited",
+                "request_failed", "connection_failed", "response_invalid",
+                "request_rejected", "service_unavailable"}:
+            return category
     api_category = _heybox_api_category(error)
     if api_category is not None:
         return _HEYBOX_API_CATEGORIES[api_category]
+    # aiohttp connector failures are transport errors even though its
+    # ClientOSError subclasses also inherit OSError. Keep HTTP/status,
+    # permission and local-storage semantics on their existing paths.
+    if isinstance(error, aiohttp.ClientConnectionError):
+        return "request_failed"
     if isinstance(error, sqlite3.Error):
         return "storage_failed"
     if isinstance(error, (TimeoutError, ConnectionError)):
@@ -352,6 +376,30 @@ def consume_heybox_retry_wake(adapter, feed):
     """Consume a wake signal without granting source/model/send permission."""
     owner = _ACTIVE_INCIDENT_HOOKS
     return owner is not None and owner._consume_retry_wake(adapter, feed) is True
+
+
+
+def complete_heybox_retry_discovery(feed, cycle):
+    """Mark only the current task's fully exhausted, unclaimed source batch."""
+    owner = _ACTIVE_INCIDENT_HOOKS
+    intake = _HEYBOX_RETRY_INTAKE.get()
+    scope = _AUTOMATIC_FEED_SCOPE.get()
+    try:
+        if (owner is None or owner._active is not True
+                or not isinstance(scope, tuple) or len(scope) != 3
+                or scope[0] is not owner or scope[1] is not feed
+                or not isinstance(intake, dict) or intake.get("owner") is not owner
+                or intake.get("task") is not asyncio.current_task() or intake.get("claimed")
+                or not owner._retry_intake_allowed() or not automatic_feed_ready(feed)
+                or type(cycle) is not dict or cycle.get("phase") != "complete"
+                or cycle.get("outcome") != "returned"
+                or any(type(cycle.get(key)) is not int or cycle[key] != 0 for key in (
+                    "generated", "stopped_paused", "stopped_reserve_quota", "stopped_run_limit"))):
+            return False
+        intake["discovery_complete"] = True
+        return True
+    except Exception:
+        return False
 
 
 def _request_not_authorized():
@@ -536,9 +584,18 @@ class IncidentHooks:
         self.host = host
         self._active = True
         self._bindings = {}
+        self._model_transport_diagnostics = None
+        try:
+            from .model_transport_diagnostics import ModelTransportDiagnostics
+            self._model_transport_diagnostics = ModelTransportDiagnostics()
+        except Exception:
+            pass
         self._missing = []
         # If ledger reporting itself fails, fail closed in this process too.
         self._local_blocked = set()
+        # Short-lived barriers have their own identities. They never clear an
+        # independent hard fail-closed latch, even when callbacks overlap.
+        self._temporary_blocks = {}
         self._notice_claims = {}
         self._heybox_rejection_pending = set()
         # Only fresh ordinary events claimed under this handle may use the
@@ -546,6 +603,9 @@ class IncidentHooks:
         self._heybox_rejection_enabled_at = time.time()
         self._retry_enabled_at = time.time()
         self._retry_claims = {}
+        # Process-local proof of the exact first transient image cooldown.
+        # Never reconstruct it from an old incident or a restarted trial.
+        self._retry_image_cooldowns = {}
         self._retry_events = {}
         self._retry_reported = set()
         self._retry_post_reports = {}
@@ -555,6 +615,65 @@ class IncidentHooks:
         self._retry_available = False
         _ACTIVE_INCIDENT_HOOKS = self
         self.refresh()
+
+    def _local_features(self):
+        return self._local_blocked.union(self._temporary_blocks.values())
+
+    def _begin_local_temporary(self, feature):
+        token = object()
+        self._temporary_blocks[token] = feature
+        return token
+
+    def _end_local_temporary(self, feature, token, handed_off):
+        # A missing token or unconfirmed handoff becomes a persistent local
+        # latch. Never remove an independently added hard latch.
+        if self._temporary_blocks.get(token) != feature or handed_off is not True:
+            self._local_blocked.add(feature)
+        self._temporary_blocks.pop(token, None)
+
+    def _trial_failure_started(self, runtime, event_id, route):
+        """Identify the exact still-started trial before its failure await."""
+        grant = self._retry_claims.get((id(runtime), event_id))
+        scoped = _HEYBOX_RETRY_EVENT.get()
+        trial_required = ((isinstance(grant, dict) and grant.get("trial") is not None)
+                          or (isinstance(scoped, dict) and scoped.get("trial") is not None))
+        if not trial_required:
+            return False, None
+        try:
+            trial = grant["trial"]
+            valid = (scoped is grant and grant["runtime"] is runtime and grant["event_id"] == event_id
+                     and grant["active"] is True and grant["finished"] is False
+                     and grant["post_id"] == str(route.post_id)
+                     and grant["event_key"] == str(route.profile_id) + ":" + str(event_id)
+                     and self.host.incidents.retry_check(trial["incident_id"], trial["token"],
+                                                         grant["post_id"], grant["event_key"]) is True)
+            return True, grant if valid else None
+        except Exception:
+            return True, None
+
+    def _trial_failure_handed_off(self, runtime, event_id, route, grant):
+        """Prove this exact trial failed into a confirmed, durable pause."""
+        try:
+            if (not isinstance(grant, dict) or _HEYBOX_RETRY_EVENT.get() is not grant
+                    or self._retry_claims.get((id(runtime), event_id)) is not grant
+                    or grant["runtime"] is not runtime or grant["event_id"] != event_id
+                    or grant["active"] is not True or grant["finished"] is not True
+                    or grant["post_id"] != str(route.post_id)
+                    or grant["event_key"] != str(route.profile_id) + ":" + str(event_id)):
+                return False
+            trial = grant["trial"]
+            policy = self.host.incidents
+            row = policy._retry_current(trial["incident_id"])
+            return bool(row and row["scope"] == "heybox" and row["phase"] == "blocked"
+                        and row["generation"] == policy._retry_store.generation
+                        and row["candidate_key_hash"] == content_hash("heybox", grant["post_id"])
+                        and row["event_key_hash"] == _key_hash("heybox", grant["event_key"], "event")
+                        and row["token_hash"] == hashlib.sha256(trial["token"].encode()).hexdigest()
+                        and row["notification"] == "sent" and row["notice_receipt_kind"] == "native"
+                        and bool(row["notice_id"]) and bool(row["notice_message_id"])
+                        and policy.blocked(row["feature"]) is True)
+        except Exception:
+            return False
 
     def _blocked(self, *features):
         # In-flight wrappers and callbacks can outlive restore().  They must
@@ -574,7 +693,7 @@ class IncidentHooks:
                 return True
             if "heybox_comment" in features and getattr(self, "_heybox_rejection_pending", None):
                 return True
-            return any(f in self._local_blocked or policy.blocked(f) is not False for f in features)
+            return any(f in self._local_features() or policy.blocked(f) is not False for f in features)
         except Exception:
             return True
 
@@ -636,7 +755,7 @@ class IncidentHooks:
                         and self._retry_available
                         and self.retry_local_preflight("heybox")
                         and not self._heybox_rejection_pending
-                        and not self._local_blocked.intersection({"heybox_feed", "heybox_comment", "heybox_vision"})
+                        and not self._local_features().intersection({"heybox_feed", "heybox_comment", "heybox_vision"})
                         and grant.get("task") is asyncio.current_task() and not grant.get("claimed")
                         and self.host.incidents.retry_intake_allowed(grant["incident_id"]) is True)
         except Exception:
@@ -646,7 +765,7 @@ class IncidentHooks:
         """No trial may bypass this exact active owner's local safety latch."""
         features = ({"heybox_feed", "heybox_comment", "heybox_vision"} if scope == "heybox"
                     else {"bili_journal"} if scope == "bili_journal" else None)
-        required = ({"feed", "heybox_vision", "heybox_vision_group", "heybox_vision_provider",
+        required = ({"feed", "heybox_vision", "heybox_vision_group", "heybox_vision_provider", "heybox_vision_available",
                      "heybox_model_failure", "heybox_delivery", "heybox_get_client",
                      "heybox_retry_register", "heybox_retry_pipeline", "heybox_retry_model_class"}
                     if scope == "heybox" else {"bili_journal"})
@@ -654,7 +773,7 @@ class IncidentHooks:
             return bool(features is not None and self._active and _ACTIVE_INCIDENT_HOOKS is self
                         and getattr(self.host, "_incident_hooks", None) is self
                         and self._retry_available and not self._missing
-                        and not self._local_blocked.intersection(features)
+                        and not self._local_features().intersection(features)
                         and required.issubset(self._bindings)
                         and all(getattr(self._bindings[key]["object"], self._bindings[key]["name"], None)
                                 is self._bindings[key]["wrapped"] for key in required))
@@ -702,6 +821,7 @@ class IncidentHooks:
             return False
         trial = grant["trial"]
         grant["finished"] = True
+        self._retry_image_cooldowns.pop(trial["incident_id"], None)
         return await self.host.incidents.retry_finish(trial["incident_id"], trial["token"],
             grant["post_id"], grant["event_key"], outcome=outcome)
 
@@ -769,12 +889,20 @@ class IncidentHooks:
                 reason = ("main_retry_" + classification[len("vision_retry_"):]
                           if type(classification) is str and classification.startswith("vision_retry_")
                           else "main_retry_classification_unavailable")
+            observation = None
+            collector = self._model_transport_diagnostics
+            if collector is not None:
+                try:
+                    observation = collector.snapshot(failed=True)
+                except Exception:
+                    pass
             record_failure(getattr(self.host, "root", None), "heybox_comment", stage,
-                           error=error, reason=reason)
+                           error=error, reason=reason, model_transport=observation)
         except Exception:
             pass
 
-    async def _retry_report_failure(self, runtime, event_id, route, feature, category, stage, kind, *, detail=None):
+    async def _retry_report_failure(self, runtime, event_id, route, feature, category, stage, kind, *, detail=None,
+                                    image_cooldown=None):
         detail = detail if detail in {"tls_eof", "connection", "timeout"} else (
             kind if kind in {"connection", "timeout"} else "other")
         if runtime is None:
@@ -823,6 +951,12 @@ class IncidentHooks:
         if retry is not None and type(incident_id) is str:
             ready = self.host.incidents.retry_ready(incident_id, str(route.post_id), verified_terminal=True) is True
             if ready:
+                if (feature == "heybox_vision" and isinstance(image_cooldown, dict)
+                        and image_cooldown.get("runtime") is runtime
+                        and image_cooldown.get("event_id") == event_id
+                        and image_cooldown.get("post_id") == str(route.post_id)
+                        and image_cooldown.get("key", (None,))[0] == route.profile_id):
+                    self._retry_image_cooldowns[incident_id] = image_cooldown
                 # Preserve the one durable trial for the normal native feed cadence.
                 self._record_retry_decision(feature, detail, "normal_interval")
             else:
@@ -934,7 +1068,18 @@ class IncidentHooks:
                 except Exception as error:
                     self._record_heybox_image_dns(runtime, error)
                     if grant.get("trial") is not None:
-                        await self._retry_finish_grant(grant, "failed")
+                        module = sys.modules.get(runtime.__class__.__module__)
+                        block = getattr(module, "block_event", None)
+                        try:
+                            if callable(block):
+                                await block(runtime.repository, event_id, "new_content_processing_failed")
+                            terminal = await self._retry_terminal(runtime, event_id, route)
+                        except Exception:
+                            terminal = False
+                        await self._retry_finish_grant(grant, "failed" if terminal else "unknown")
+                        if not terminal or not self._trial_failure_handed_off(runtime, event_id, route, grant):
+                            self._local_blocked.add("heybox_comment")
+                            raise _request_not_authorized() from error
                         return
                     kind = _retry_exception_kind(error)
                     security = sys.modules.get(runtime.__class__.__module__.rsplit(".", 1)[0] + ".security")
@@ -992,7 +1137,7 @@ class IncidentHooks:
                     if not isinstance(retry, dict):
                         return 0
                     intake_token = _HEYBOX_RETRY_INTAKE.set({**retry, "owner": self,
-                        "task": asyncio.current_task(), "claimed": False})
+                        "task": asyncio.current_task(), "claimed": False, "discovery_complete": False})
                     if not self._retry_intake_allowed():
                         return 0
                 try:
@@ -1008,9 +1153,27 @@ class IncidentHooks:
                         await self._report("heybox_feed", _category(error), "feed_once")
                     raise
             finally:
-                if intake_token is not None:
-                    _HEYBOX_RETRY_INTAKE.reset(intake_token)
-                _AUTOMATIC_FEED_SCOPE.reset(scope_token)
+                try:
+                    if intake_token is not None:
+                        try:
+                            intake = _HEYBOX_RETRY_INTAKE.get()
+                            if (isinstance(intake, dict) and intake.get("owner") is self
+                                    and intake.get("task") is asyncio.current_task()
+                                    and intake.get("discovery_complete") is True and not intake.get("claimed")
+                                    and self._retry_intake_allowed()):
+                                try:
+                                    closed = await self.host.incidents.retry_abort_ready(intake["incident_id"])
+                                except asyncio.CancelledError:
+                                    self._local_blocked.add("heybox_feed")
+                                    raise
+                                except Exception:
+                                    closed = False
+                                if closed is not True:
+                                    self._local_blocked.add("heybox_feed")
+                        finally:
+                            _HEYBOX_RETRY_INTAKE.reset(intake_token)
+                finally:
+                    _AUTOMATIC_FEED_SCOPE.reset(scope_token)
         return wrapped
 
     def _notice_poll_pool_state(self, pool):
@@ -1369,23 +1532,27 @@ class IncidentHooks:
         completed = getattr(event, "_completion", None)
         return bool(completed is not None and completed.is_set())
 
-    async def _finish_vision_incident(self, event, failure_kind=None):
+    async def _finish_vision_incident(self, event, failure_kind=None, *, image_cooldown=None):
         """Atomically prevent a late send before recording this failure."""
         if self._vision_event_finished(event):
             return False
 
         async def record():
             # Close the group synchronously before the terminal-state await.
-            self._local_blocked.add("heybox_vision")
+            local_token = self._begin_local_temporary("heybox_vision")
+            handed_off = False
             try:
                 await event.runtime.fail_reply(event_id=event.event_id, route=event.route,
                                                error="incident_vision_failed", generated_ms=0)
+                is_trial, grant = self._trial_failure_started(event.runtime, event.event_id, event.route)
                 await self._retry_report_failure(event.runtime, event.event_id, event.route,
-                    "heybox_vision", "vision_failed", "notice_event", failure_kind)
+                    "heybox_vision", "vision_failed", "notice_event", failure_kind,
+                    image_cooldown=image_cooldown)
+                handed_off = (self._trial_failure_handed_off(event.runtime, event.event_id, event.route, grant)
+                              if is_trial and grant is not None else
+                              False if is_trial else self.host.incidents.blocked("heybox_vision") is True)
             finally:
-                # Persistent F060 or the trial store now owns the closed gate.
-                if self.host.incidents.blocked("heybox_vision") is True:
-                    self._local_blocked.discard("heybox_vision")
+                self._end_local_temporary("heybox_vision", local_token, handed_off)
 
         lock = getattr(event, "_send_lock", None)
         completed = getattr(event, "_completion", None)
@@ -1419,9 +1586,11 @@ class IncidentHooks:
             await plugin._deny_automatic_event(event, "vision_not_completed")
 
     def _vision_provider_failure(self, original):
+        runtime = getattr(original, "__self__", None)
         @functools.wraps(original, updated=())
         def wrapped(profile_id, purpose, provider_id, error, *, details=None):
             group = _HEYBOX_VISION_GROUP.get()
+            kind = None
             if (group is not None and group["task"] is asyncio.current_task()
                     and purpose == "image" and _category(error) is not None):
                 group["failed"] = True
@@ -1430,9 +1599,71 @@ class IncidentHooks:
                     group["hard_failure"] = True
                 elif group.get("failure_kind") is None:
                     group["failure_kind"] = kind
+                observation = None
+                collector = self._model_transport_diagnostics
+                if collector is not None:
+                    try:
+                        observation = collector.last_vision(group.get("event"))
+                    except Exception:
+                        pass
                 record_failure(getattr(self.host, "root", None), "heybox_vision",
-                               "vision_provider", error=error, reason=decision)
-            return original(profile_id, purpose, provider_id, error, details=details)
+                               "vision_provider", error=error, reason=decision, model_transport=observation)
+            result = original(profile_id, purpose, provider_id, error, details=details)
+            event = group.get("event") if isinstance(group, dict) else None
+            if (kind in {"connection", "timeout"} and event is not None
+                    and event.runtime is runtime and event.route.profile_id == profile_id
+                    and not group["hard_failure"]):
+                try:
+                    key = runtime._aux_provider_key(profile_id, purpose, provider_id)
+                    state = runtime._aux_provider_cooldowns.get(key)
+                    if (isinstance(state, dict) and state.get("cooldown_seconds") == 60
+                            and state.get("until", 0) > time.time()):
+                        group["image_cooldown"] = {"runtime": runtime, "event_id": event.event_id,
+                            "post_id": str(event.route.post_id), "key": key,
+                            "state": state, "snapshot": dict(state)}
+                except Exception:
+                    pass
+            return result
+        return wrapped
+
+    def _vision_provider_available(self, original):
+        runtime = getattr(original, "__self__", None)
+        @functools.wraps(original, updated=())
+        def wrapped(profile_id, purpose, provider_id):
+            available = original(profile_id, purpose, provider_id)
+            if available is not False or purpose != "image":
+                return available
+            try:
+                task = asyncio.current_task()
+                grant = _HEYBOX_RETRY_EVENT.get()
+                if (task is None or task.done() or task.cancelling()
+                        or not isinstance(grant, dict) or not grant.get("active")
+                        or grant.get("finished") or grant.get("runtime") is not runtime
+                        or grant.get("pipeline_task") is not task
+                        or not self.retry_local_preflight("heybox")):
+                    return False
+                trial, event = grant.get("trial"), grant.get("event")
+                if (not isinstance(trial, dict) or event is None
+                        or self._retry_events.get(id(event)) is not grant
+                        or self._retry_claims.get((id(runtime), grant["event_id"])) is not grant
+                        or getattr(event, "proactive", None) is not True
+                        or event.route != grant["notification"].route
+                        or event.route.profile_id != profile_id or self._vision_event_finished(event)):
+                    return False
+                plugin, current, _ = _current_heybox(self)
+                proof = self._retry_image_cooldowns.get(trial["incident_id"])
+                key = runtime._aux_provider_key(profile_id, purpose, provider_id)
+                state = runtime._aux_provider_cooldowns.get(key)
+                if (current is not runtime or not self._vision_event_bound(plugin, event)
+                        or not isinstance(proof, dict) or proof["runtime"] is not runtime
+                        or proof["post_id"] == grant["post_id"] or proof["event_id"] == grant["event_id"]
+                        or proof["key"] != key or state is not proof["state"]
+                        or state != proof["snapshot"] or self._blocked("heybox_feed", "heybox_comment", "heybox_vision")):
+                    return False
+                return self.host.incidents.retry_check(trial["incident_id"], trial["token"],
+                    grant["post_id"], grant["event_key"]) is True
+            except Exception:
+                return False
         return wrapped
 
     def _vision_group(self, original):
@@ -1446,7 +1677,7 @@ class IncidentHooks:
                         and bool(settings.get("enable_image_understanding", True)))
             if not eligible:
                 return await original(event, *args, **kwargs)
-            group = {"task": asyncio.current_task(), "failed": False,
+            group = {"task": asyncio.current_task(), "event": event, "failed": False,
                      "hard_failure": False, "failure_kind": None}
             token = _HEYBOX_VISION_GROUP.set(group)
             try:
@@ -1461,7 +1692,8 @@ class IncidentHooks:
             finally:
                 _HEYBOX_VISION_GROUP.reset(token)
             if result is None and group["failed"]:
-                await self._finish_vision_incident(event, None if group["hard_failure"] else group["failure_kind"])
+                await self._finish_vision_incident(event, None if group["hard_failure"] else group["failure_kind"],
+                    image_cooldown=None if group["hard_failure"] else group.get("image_cooldown"))
                 # Stop the current event before another image group can run.
                 raise IncidentFeaturePaused("incident_vision_failed")
             return result
@@ -1504,31 +1736,77 @@ class IncidentHooks:
         async def wrapped(*, event_id, route, error, generated_ms):
             expected = event_id is not None and isinstance(error, str) and (
                 error.startswith("heybox_main_model_failed:") or error == "AstrBot 原生管线返回空回复")
-            if expected:
-                self._local_blocked.add("heybox_comment")
-            result = await original(event_id=event_id, route=route, error=error, generated_ms=generated_ms)
-            # These are native fixed error codes; cancellation and arbitrary
-            # exception messages cannot be mistaken for model failures.
-            if event_id is not None and isinstance(error, str) and (
-                    error.startswith("heybox_main_model_failed:")
-                    or error == "AstrBot 原生管线返回空回复"):
-                category = {
-                    "heybox_main_model_failed:APIConnectionError": "model_connection_failed",
-                    "heybox_main_model_failed:ConnectError": "model_connection_failed",
-                    "heybox_main_model_failed:APITimeoutError": "model_timeout",
-                    "heybox_main_model_failed:TimeoutException": "model_timeout",
-                }.get(error, "model_failed")
-                error_object = _HEYBOX_MODEL_EXCEPTION.get()
-                self._record_heybox_main_failure("heybox_main_model", error_object)
-                kind = _retry_exception_kind(error_object)
-                graph = _retry_exception_graph(error_object)
-                detail = ("tls_eof" if kind == "connection" and graph is not None
-                          and _retry_tls_eof(error_object, graph) is not None else kind)
-                await self._retry_report_failure(runtime, event_id, route,
-                    "heybox_comment", category, "notice_event", kind, detail=detail)
-                if self.host.incidents.blocked("heybox_comment") is True:
-                    self._local_blocked.discard("heybox_comment")
-            return result
+            local_token = self._begin_local_temporary("heybox_comment") if expected else None
+            handed_off = False
+            try:
+                result = await original(event_id=event_id, route=route, error=error, generated_ms=generated_ms)
+                # These are native fixed error codes; cancellation and arbitrary
+                # exception messages cannot be mistaken for model failures.
+                if expected:
+                    category = {
+                        "heybox_main_model_failed:APIConnectionError": "model_connection_failed",
+                        "heybox_main_model_failed:ConnectError": "model_connection_failed",
+                        "heybox_main_model_failed:APITimeoutError": "model_timeout",
+                        "heybox_main_model_failed:TimeoutException": "model_timeout",
+                    }.get(error, "model_failed")
+                    error_object = _HEYBOX_MODEL_EXCEPTION.get()
+                    self._record_heybox_main_failure("heybox_main_model", error_object)
+                    kind = _retry_exception_kind(error_object)
+                    graph = _retry_exception_graph(error_object)
+                    detail = ("tls_eof" if kind == "connection" and graph is not None
+                              and _retry_tls_eof(error_object, graph) is not None else kind)
+                    is_trial, grant = self._trial_failure_started(runtime, event_id, route)
+                    await self._retry_report_failure(runtime, event_id, route,
+                        "heybox_comment", category, "notice_event", kind, detail=detail)
+                    handed_off = (self._trial_failure_handed_off(runtime, event_id, route, grant)
+                                  if is_trial and grant is not None else
+                                  False if is_trial else self.host.incidents.blocked("heybox_comment") is True)
+                return result
+            finally:
+                if expected:
+                    self._end_local_temporary("heybox_comment", local_token, handed_off)
+        return wrapped
+
+    def _model_transport_call(self, original):
+        @functools.wraps(original, updated=())
+        async def wrapped(checked, *args, **kwargs):
+            span = None
+            collector = self._model_transport_diagnostics
+            try:
+                if collector is not None and self._active and _ACTIVE_INCIDENT_HOOKS is self:
+                    plugin = self.host.plugin("astrbot_plugin_xiaoheihe_adapter")
+                    callback = getattr(checked, "_failed", None)
+                    event = getattr(callback, "__self__", None)
+                    phase = "main"
+                    if event is None:
+                        group = _HEYBOX_VISION_GROUP.get()
+                        if type(group) is dict and group.get("task") is asyncio.current_task():
+                            event, phase = group.get("event"), "vision"
+                    runner = getattr(checked, "_runner", None)
+                    main_bound = (phase != "main" or (
+                        getattr(getattr(getattr(runner, "run_context", None), "context", None), "event", None) is event
+                        and callable(callback)))
+                    if event is not None and main_bound and self._vision_event_bound(plugin, event):
+                        span = collector.begin(checked, event, phase)
+            except Exception:
+                pass
+            outcome = "unknown"
+            try:
+                result = await original(checked, *args, **kwargs)
+                outcome = "success"
+                return result
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except Exception:
+                outcome = "failed"
+                raise
+            finally:
+                if span is not None:
+                    try:
+                        collector.finish(span, outcome)
+                    except Exception:
+                        pass
         return wrapped
 
     def _main_exception(self, original):
@@ -1621,7 +1899,7 @@ class IncidentHooks:
     def _heybox_rejection_ready(self, policy, features, snapshot):
         """Allow notices for two already-failed items, never new platform work."""
         try:
-            if (any(feature in self._local_blocked for feature in features)
+            if (any(feature in self._local_features() for feature in features)
                     or self._resume_snapshot(features) != snapshot):
                 return False
             state = policy.status()
@@ -1638,11 +1916,11 @@ class IncidentHooks:
 
     async def _heybox_rejection_pause(self, runtime, wrapper, policy, category, notice_id="", *, notify=False):
         """Hand off only to a durable F060 pause; uncertain notices never repeat."""
-        already_local = "heybox_comment" in self._local_blocked
-        self._local_blocked.add("heybox_comment")
-        if not self._heybox_rejection_current(runtime, wrapper, policy):
-            return False
+        local_token = self._begin_local_temporary("heybox_comment")
+        handed_off = False
         try:
+            if not self._heybox_rejection_current(runtime, wrapper, policy):
+                return False
             result = await policy.report("heybox_comment", category, stage="reply_send",
                                          event_id=notice_id, notify=notify)
             if not self._heybox_rejection_current(runtime, wrapper, policy):
@@ -1654,13 +1932,15 @@ class IncidentHooks:
                 ack = policy.acknowledge_heybox_rejection_pause(notice_id, result.get("incident_id"))
                 if not (isinstance(ack, dict) and ack.get("ok") is True):
                     return False
-            if not already_local:
-                self._local_blocked.discard("heybox_comment")
+            handed_off = True
             return True
         except Exception:
             return False
+        finally:
+            self._end_local_temporary("heybox_comment", local_token, handed_off)
 
-    async def _heybox_rejection_item(self, runtime, wrapper, policy, kwargs, features, snapshot, started_at):
+    async def _heybox_rejection_item(self, runtime, wrapper, policy, kwargs, features, snapshot, started_at,
+                                    *, reason="platform_content_rejected"):
         """Isolate one proven fresh rejection, preserving all original rows."""
         stopped = {"status": "ignored", "reason": "incident_feature_paused", "external_comment_id": ""}
         if not self._heybox_rejection_current(runtime, wrapper, policy):
@@ -1754,7 +2034,7 @@ class IncidentHooks:
             return stopped
         outgoing_id = row["outgoing_id"]
         try:
-            result = await policy.report_heybox_rejection(event_id, outgoing_id, stage="reply_send")
+            result = await policy.report_heybox_rejection(event_id, outgoing_id, stage="reply_send", reason=reason)
         except asyncio.CancelledError:
             notice_id = ""
             try:
@@ -1778,7 +2058,7 @@ class IncidentHooks:
             return stopped
         if (isinstance(result, dict) and result.get("ok") is True and result.get("isolated") is True
                 and result.get("notification") == "sent" and self._resume_snapshot(features) == snapshot):
-            return {"status": "ignored", "reason": "platform_content_rejected", "external_comment_id": ""}
+            return {"status": "ignored", "reason": reason, "external_comment_id": ""}
         notice_id = result.get("notice_id", "") if isinstance(result, dict) else ""
         reason = result.get("reason", "") if isinstance(result, dict) else ""
         notification = result.get("notification", "") if isinstance(result, dict) else ""
@@ -1893,7 +2173,8 @@ class IncidentHooks:
                     if grant is not None and grant.get("trial") is not None:
                         await self._retry_finish_grant(grant, "unknown" if _heybox_api_category(error) == "send_unknown" else "failed")
                         raise
-                    if _heybox_api_category(error) == "platform_content_rejected":
+                    rejection_reason = _heybox_api_category(error)
+                    if rejection_reason in {"platform_content_rejected", "platform_target_deleted"}:
                         # Close the final HTTP gate before the first metadata
                         # await. Each call releases only its own temporary gate;
                         # a failed handoff keeps the separate fail-closed latch.
@@ -1904,7 +2185,8 @@ class IncidentHooks:
                         pending.add(ticket)
                         try:
                             return await self._heybox_rejection_item(
-                                runtime, wrapped, policy, kwargs, features, snapshot, started_at)
+                                runtime, wrapped, policy, kwargs, features, snapshot, started_at,
+                                reason=rejection_reason)
                         finally:
                             pending.discard(ticket)
                     await self._report("heybox_comment", _category(error), "reply_send")
@@ -2085,7 +2367,7 @@ class IncidentHooks:
                 return await original(steward, *args, **kwargs)
             intake = None
             if (not self._active or _ACTIVE_INCIDENT_HOOKS is not self
-                    or "bili_journal" in self._local_blocked):
+                    or "bili_journal" in self._local_features()):
                 return {"processed": 0, "status": "incident_feature_paused"}
             if self._blocked("bili_journal"):
                 intake = self.host.incidents.retry_intake("bili_journal") if self._retry_available else None
@@ -2100,6 +2382,7 @@ class IncidentHooks:
             if isinstance(result, dict):
                 retry = result.pop("_retry_failure", None)
                 terminal = result.pop("_retry_terminal", False)
+                retry_stage = result.pop("_retry_stage", None)
                 if intake is not None and self.host.incidents.retry_intake("bili_journal") != intake:
                     # The worker owns this trial's one terminal/notice action.
                     # Do not manufacture another incident for its same failure.
@@ -2121,14 +2404,18 @@ class IncidentHooks:
                             "provider_unavailable": "model_failed",
                             "invalid_model_or_citation": "model_failed",
                         }.get(reason, category)
-                    valid_retry = (self._retry_available and terminal is True and category == "model_failed"
+                    source_retry = (retry_stage == "bili_source_read" and status == "failed"
+                                    and reason == "source_read_failed" and category == "request_failed")
+                    model_retry = retry_stage is None and category == "model_failed"
+                    valid_retry = (self._retry_available and terminal is True and (model_retry or source_retry)
                         and type(retry) is dict and set(retry) == {"scope", "failed_key", "failure_kind"}
                         and retry.get("scope") == "bili_journal" and type(retry.get("failed_key")) is str
                         and len(retry["failed_key"]) == 12 and retry["failed_key"].startswith("BV")
                         and retry["failed_key"].isascii() and retry["failed_key"].isalnum()
                         and type(retry.get("failure_kind")) is str
                         and retry.get("failure_kind") in {"connection", "timeout"})
-                    report = await self._report("bili_journal", category, "bili_journal_once",
+                    stage = "bili_source_read" if valid_retry and source_retry else "bili_journal_once"
+                    report = await self._report("bili_journal", category, stage,
                                                 retry=retry if valid_retry else None)
                     if valid_retry and isinstance(report, dict) and type(report.get("incident_id")) is str:
                         # Keep the trial ready for a genuinely new watch on the normal schedule.
@@ -2296,6 +2583,8 @@ class IncidentHooks:
         add("heybox_vision_group", heybox, "_caption_thread_image_group", self._vision_group)
         add("heybox_vision_provider", runtime, "report_auxiliary_provider_failure",
             self._vision_provider_failure, asynchronous=False)
+        add("heybox_vision_available", runtime, "auxiliary_provider_available",
+            self._vision_provider_available, asynchronous=False)
         add("heybox_model_failure", runtime, "fail_reply", self._model_failure)
         add("heybox_reply_timeout", runtime, "expire_reply", self._reply_expire)
         add("heybox_delivery", runtime, "deliver", self._comment_delivery)
@@ -2306,6 +2595,8 @@ class IncidentHooks:
         plugin_module = sys.modules.get(getattr(type(heybox), "__module__", ""))
         checked_type = getattr(plugin_module, "_CheckedProvider", None)
         add("heybox_retry_model_class", checked_type, "_report_exception", self._main_exception)
+        if self._model_transport_diagnostics is not None:
+            add("heybox_model_transport", checked_type, "text_chat", self._model_transport_call)
         clients = getattr(runtime, "_clients", {})
         if isinstance(clients, dict):
             for client in clients.values():
@@ -2329,13 +2620,18 @@ class IncidentHooks:
 
         missing = []
         for key, (obj, name, factory, asynchronous) in desired.items():
-            if not self._bind(key, obj, name, factory, asynchronous=asynchronous):
+            if key == "heybox_model_transport":
+                try:
+                    self._bind(key, obj, name, factory, asynchronous=asynchronous)
+                except Exception:
+                    pass
+            elif not self._bind(key, obj, name, factory, asynchronous=asynchronous):
                 missing.append(key)
         for key in set(self._bindings) - set(desired):
             self._restore_binding(self._bindings.pop(key))
         required = {"feed", "autopost", "autopost_send", "qzone_sync", "qzone_request", "qzone_candidate", "bili_share",
                     "bili_journal", "bili_browse", "bili_poll", "bili_poll_finish", "bili_inner", "bili_action", "qzone_publication",
-                    "heybox_vision", "heybox_vision_group", "heybox_vision_provider",
+                    "heybox_vision", "heybox_vision_group", "heybox_vision_provider", "heybox_vision_available",
                     "heybox_model_failure", "heybox_reply_timeout", "heybox_delivery",
                      "heybox_get_client", "heybox_retry_register", "heybox_retry_pipeline", "heybox_retry_model_class"}
         missing.extend(sorted(required - set(desired)))
@@ -2399,19 +2695,323 @@ class IncidentHooks:
         except Exception:
             return {"observed": False, "loops": []}
 
+    def _model_http_pool_status(self):
+        """Bounded local counts only; never select, send, close or mutate clients."""
+        from .heybox_write import _is_abandoned_heybox_tunnel
+
+        def count_pool(pool):
+            if pool is None or not (type(pool).__module__ == "httpcore" or type(pool).__module__.startswith("httpcore.")):
+                return {"observed": False}
+            connections = getattr(pool, "_connections", ())
+            requests = getattr(pool, "_requests", ())
+            if not isinstance(connections, list) or not isinstance(requests, list):
+                return {"observed": False}
+            sampled = tuple(connections[:512])
+            queued = tuple(requests[:512])
+            result = {"observed": True, "connections": len(connections), "requests": len(requests),
+                      "sample_truncated": len(connections) > 512 or len(requests) > 512,
+                      "active": 0, "idle": 0, "closed": 0, "new": 0, "state_unknown": 0,
+                      "unconnected": 0, "inner_unconnected": 0, "connect_failed": 0, "stream_closed": 0,
+                      "stream_closed_unknown": 0, "unassigned_requests": 0,
+                      "unassigned_connections": 0 if len(requests) <= 4096 else None,
+                      "assigned_connection_absent_from_pool": 0,
+                      "connect_lock_idle": 0, "active_without_assigned_request": 0,
+                      "abandoned_eligible": 0, "abandoned_unknown": 0}
+            for name in ("max_connections", "max_keepalive_connections"):
+                value = getattr(pool, "_" + name, None)
+                result[name] = value if type(value) is int else None
+            result["http1"] = getattr(pool, "_http1", None) is True
+            result["http2"] = getattr(pool, "_http2", None) is True
+            for request in queued:
+                connection = getattr(request, "connection", None)
+                if connection is None:
+                    result["unassigned_requests"] += 1
+                elif not any(connection is current for current in sampled):
+                    result["assigned_connection_absent_from_pool"] += 1
+            for connection in sampled:
+                tunnel_unconnected = getattr(connection, "_connected", None) is False
+                lock = getattr(connection, "_connect_lock", None)
+                backend = getattr(lock, "_backend", None)
+                anyio_lock = getattr(lock, "_anyio_lock", None)
+                lock_idle = (backend == "" or (
+                    backend == "asyncio" and anyio_lock is not None
+                    and type(anyio_lock).__module__.startswith("anyio.")
+                    and getattr(anyio_lock, "_owner_task", _ABSENT) is None))
+                result["unconnected"] += tunnel_unconnected
+                result["connect_lock_idle"] += lock_idle
+                # Eligibility rechecks the entire live request list, never just
+                # the output sample. Oversized shapes are unknown, not eligible.
+                no_request = (len(requests) <= 4096 and not any(
+                    getattr(request, "connection", None) is connection for request in requests))
+                if result["unassigned_connections"] is not None:
+                    result["unassigned_connections"] += no_request
+                if len(requests) > 4096:
+                    result["abandoned_unknown"] += 1
+                else:
+                    try:
+                        result["abandoned_eligible"] += _is_abandoned_heybox_tunnel(pool, connection) is True
+                    except Exception:
+                        result["abandoned_unknown"] += 1
+                current = connection
+                state = "state_unknown"
+                stream = None
+                for _ in range(4):
+                    if current is None:
+                        result["inner_unconnected"] += 1
+                        break
+                    if getattr(current, "_connect_failed", None) is True:
+                        result["connect_failed"] += 1
+                    current_state = getattr(getattr(current, "_state", None), "name", None)
+                    if current_state in {"ACTIVE", "IDLE", "CLOSED", "NEW"}:
+                        state = current_state.lower()
+                    candidate = getattr(current, "_network_stream", None)
+                    if candidate is not None:
+                        stream = candidate
+                    child = getattr(current, "_connection", _ABSENT)
+                    if child is _ABSENT:
+                        break
+                    current = child
+                result[state] += 1
+                closed = None
+                for _ in range(5):
+                    if stream is None:
+                        break
+                    value = getattr(stream, "_closed", None)
+                    if type(value) is bool:
+                        closed = value
+                        if value:
+                            break
+                    child = getattr(stream, "_stream", _ABSENT)
+                    if child is _ABSENT:
+                        child = getattr(stream, "transport_stream", _ABSENT)
+                    if child is _ABSENT:
+                        break
+                    stream = child
+                result["stream_closed"] += closed is True
+                result["stream_closed_unknown"] += closed is None
+                result["active_without_assigned_request"] += state == "active" and no_request
+            return result
+
+        def client_pools(provider):
+            sdk = getattr(provider, "client", None)
+            client = getattr(sdk, "_client", None)
+            default = getattr(getattr(client, "_transport", None), "_pool", None)
+            mounts = getattr(client, "_mounts", {})
+            pools = []
+            none_count = 0
+            if isinstance(mounts, dict):
+                for transport in tuple(mounts.values())[:64]:
+                    if transport is None:
+                        none_count += 1
+                        continue
+                    pool = getattr(transport, "_pool", None)
+                    if pool is not None and not any(pool is prior for prior in pools):
+                        pools.append(pool)
+            timeout = getattr(sdk, "timeout", None)
+            safe_timeout = {}
+            for name in ("connect", "read", "write", "pool"):
+                value = getattr(timeout, name, None)
+                safe_timeout[name] = value if type(value) in (int, float) else None
+            retries = getattr(sdk, "max_retries", None)
+            row = {"provider_present": provider is not None, "sdk_present": sdk is not None,
+                   "http_client_present": client is not None, "max_retries": retries if type(retries) is int else None,
+                   "timeout_scalar_seconds": timeout if type(timeout) in (int, float) else None,
+                   "timeout_seconds": safe_timeout, "default_pool": count_pool(default),
+                   "mounted_pools": [count_pool(pool) for pool in pools[:8]],
+                   "mounted_unique_pool_count": len(pools), "mount_none_count": none_count,
+                   "mount_sample_truncated": isinstance(mounts, dict) and (len(mounts) > 64 or len(pools) > 8)}
+            return row, sdk, client, (default, *pools)
+
+        def route_status(provider, manager):
+            # Report only fixed booleans and one-way endpoint hashes. No
+            # provider selection, network I/O, or client mutation occurs here.
+            from urllib.parse import urlsplit
+
+            try:
+                config = getattr(provider, "provider_config", None)
+                sdk = getattr(provider, "client", None)
+                client = getattr(sdk, "_client", None)
+                base = getattr(sdk, "_base_url", None)
+                if not isinstance(config, dict) or base is None or client is None:
+                    return {"observed": False}
+                loaded_base = config.get("api_base") or "https://api.openai.com/v1"
+                if not isinstance(loaded_base, str) or not loaded_base:
+                    return {"observed": False}
+                actual_text = str(base)
+                actual, expected = urlsplit(actual_text), urlsplit(loaded_base)
+                if not actual.hostname or not expected.hostname:
+                    return {"observed": False}
+                transport = client._transport_for_url(base)
+                pool = getattr(transport, "_pool", None)
+                httpcore = sys.modules.get("httpcore")
+                proxy_class = getattr(httpcore, "AsyncHTTPProxy", None)
+                is_proxy = isinstance(proxy_class, type) and type(pool) is proxy_class
+                origin = getattr(getattr(pool, "_proxy_url", None), "origin", None)
+                proxy = config.get("proxy", "")
+                parsed_proxy = urlsplit(proxy) if isinstance(proxy, str) and proxy else None
+                proxy_matches = bool(is_proxy and parsed_proxy and origin is not None
+                    and parsed_proxy.scheme.encode("ascii") == origin.scheme
+                    and parsed_proxy.hostname and parsed_proxy.hostname.encode("idna") == origin.host
+                    and parsed_proxy.port == origin.port and not parsed_proxy.username and not parsed_proxy.password)
+                context = getattr(pool, "_ssl_context", None)
+                network = sys.modules.get("astrbot.core.utils.network_utils")
+                current_context = getattr(network, "_SYSTEM_SSL_CTX", None)
+                provider_rows = getattr(manager, "providers_config", ())
+                source_rows = getattr(manager, "provider_sources_config", ())
+                provider_id = config.get("id")
+                rows = [row for row in provider_rows if isinstance(row, dict) and row.get("id") == provider_id]
+                cached = None
+                if len(rows) == 1 and isinstance(source_rows, (list, tuple)):
+                    row = rows[0]
+                    source_id = row.get("provider_source_id", "")
+                    sources = [item for item in source_rows if isinstance(item, dict) and item.get("id") == source_id]
+                    if not source_id:
+                        cached = dict(row)
+                    elif len(sources) == 1:
+                        cached = {**sources[0], **row}
+                cached_base = (cached.get("api_base") or "https://api.openai.com/v1") if cached else None
+                cached_proxy = cached.get("proxy", "") if cached else None
+                return {"observed": True,
+                        "sdk_host_sha256": hashlib.sha256(actual.hostname.encode("idna")).hexdigest(),
+                        "sdk_path_sha256": hashlib.sha256(actual.path.encode("utf-8")).hexdigest(),
+                        "sdk_scheme_https": actual.scheme == "https",
+                        "sdk_has_userinfo": bool(actual.username or actual.password),
+                        "sdk_has_query_or_fragment": bool(actual.query or actual.fragment),
+                        "sdk_host_matches_loaded_config": actual.hostname == expected.hostname,
+                        "sdk_port_matches_loaded_config": actual.port == expected.port,
+                        "sdk_path_matches_loaded_config": actual.path.rstrip("/") == expected.path.rstrip("/"),
+                        "sdk_base_matches_loaded_config": actual_text.rstrip("/") == loaded_base.rstrip("/"),
+                        "manager_cache_observed": cached is not None,
+                        "manager_base_matches_loaded_config": isinstance(cached_base, str) and cached_base.rstrip("/") == loaded_base.rstrip("/"),
+                        "manager_proxy_matches_loaded_config": isinstance(cached_proxy, str) and cached_proxy == proxy,
+                        "sdk_selected_proxy": is_proxy,
+                        "sdk_proxy_matches_loaded_config": proxy_matches,
+                        "sdk_proxy_is_expected_loopback": bool(is_proxy and origin is not None
+                            and origin.scheme == b"http" and origin.host == b"127.0.0.1" and origin.port == 7897),
+                        "sdk_tls_context_present": isinstance(context, ssl.SSLContext),
+                        "sdk_tls_verifies_certificates": bool(isinstance(context, ssl.SSLContext)
+                            and context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname),
+                        "sdk_tls_context_matches_runtime_system": bool(current_context is not None and context is current_context)}
+            except Exception:
+                return {"observed": False}
+
+        try:
+            plugin, runtime, _ = _current_heybox(self)
+            raw = getattr(getattr(runtime, "config", None), "raw", {})
+            configured = raw.get("providers", {}) if isinstance(raw, Mapping) else {}
+            context = getattr(self.host, "context", None)
+            manager = getattr(context, "provider_manager", None)
+            mapping = getattr(manager, "inst_map", None)
+            # The known map proxy wraps getters with mutation. Read its backing
+            # mapping directly; do not invoke any provider selection function.
+            for _ in range(2):
+                if getattr(mapping, "_peak_runtime_provider_map", False) is not True:
+                    break
+                mapping = getattr(mapping, "_original", None)
+            if not isinstance(mapping, dict) or not isinstance(configured, Mapping):
+                return {"observed": False}
+            main_id = configured.get("llm_provider_id") or getattr(manager, "default_chat_provider_id", "")
+            settings = getattr(manager, "provider_settings", {})
+            image_id = configured.get("image_provider_id") or (
+                settings.get("default_image_caption_provider_id", "") if isinstance(settings, dict) else "")
+            main = mapping.get(main_id) if isinstance(main_id, str) and main_id else None
+            image = mapping.get(image_id) if isinstance(image_id, str) and image_id else None
+            module = sys.modules.get(getattr(type(plugin), "__module__", ""))
+            forced_id = getattr(module, "AUTO_MAIN_PROVIDER_ID", None)
+            forced = mapping.get(forced_id) if isinstance(forced_id, str) and forced_id else None
+            main_row, main_sdk, main_client, main_pools = client_pools(main)
+            image_row, image_sdk, image_client, image_pools = client_pools(image)
+            main_row["runtime_route"] = route_status(main, manager)
+            image_row["runtime_route"] = route_status(image, manager)
+            return {"observed": True, "configuration_only_resolution": True,
+                    "main_configured": bool(main_id), "vision_configured": bool(image_id),
+                    "forced_main_present": forced is not None,
+                    "forced_main_same_as_vision": forced is not None and forced is image,
+                    "main_vision_configured_provider_matches": bool(main_id and image_id and main_id == image_id),
+                    "main_vision_same_provider_object": main is not None and main is image,
+                    "main_vision_same_sdk_client": main_sdk is not None and main_sdk is image_sdk,
+                    "main_vision_same_http_client": main_client is not None and main_client is image_client,
+                    "main_vision_pool_overlap": any(a is b for a in main_pools for b in image_pools if a is not None),
+                    "main": main_row, "vision": image_row}
+        except Exception:
+            return {"observed": False}
+
+    def _bili_following_source_status(self):
+        """Expose only identities and task metadata for a bounded local reload."""
+        try:
+            plugin = self.host.plugin("astrbot_plugin_bilibili_ai_bot")
+            if plugin is None:
+                return {"observed": False}
+            prefix = type(plugin).__module__.rsplit(".", 1)[0] + ".core."
+            network = sys.modules.get(prefix + "network")
+            bili = sys.modules.get(prefix + "bilibili")
+            proactive = sys.modules.get(prefix + "proactive")
+            identities = {
+                "modules_loaded": all(x is not None for x in (network, bili, proactive)),
+                "bilibili_pause_class_current": network is not None and bili is not None
+                    and getattr(bili, "FollowingReadPaused", None) is getattr(network, "FollowingReadPaused", _ABSENT),
+                "proactive_pause_class_current": network is not None and proactive is not None
+                    and getattr(proactive, "FollowingReadPaused", None) is getattr(network, "FollowingReadPaused", _ABSENT),
+                "http_error_class_current": network is not None and bili is not None
+                    and getattr(bili, "FollowingReadHttpError", None) is getattr(network, "FollowingReadHttpError", _ABSENT),
+                "scope_current": network is not None and bili is not None
+                    and getattr(bili, "following_read_scope", None) is getattr(network, "following_read_scope", _ABSENT),
+            }
+            tasks = asyncio.all_tasks()
+            main = [task for task in tasks if not task.done()
+                    and task.get_name() == "astrbot_plugin_bilibili_ai_bot.main_loop"]
+            current = getattr(plugin, "_task", None)
+            work = {}
+            for name in ("_proactive_task", "_dynamic_task", "_bangumi_task", "_special_follow_task",
+                         "_dynamic_watch_task", "_consolidation_task"):
+                task = getattr(plugin, name, None)
+                work[name] = bool(task is not None and not task.done())
+            locks = {}
+            for name in ("_start_lock", "_memory_write_lock", "_autonomous_plan_lock"):
+                lock = getattr(plugin, name, None)
+                locks[name] = bool(lock.locked()) if lock is not None else None
+            return {"observed": True, "schema": 1, "identity": identities,
+                    "identity_current": all(identities.values()), "main_loop_count": len(main),
+                    "main_loop_current": len(main) == 1 and main[0] is current,
+                    "main_stack_functions": [frame.f_code.co_name for frame in current.get_stack(limit=8)]
+                        if current is not None and not current.done() else [],
+                    "work_active": work, "locks": locks,
+                    "interest_cadence_ready": getattr(plugin, "_interest_proactive_cadence_ready", None),
+                    "global_memory_drain_proven": False}
+        except Exception:
+            return {"observed": False}
+
     def status(self):
+        diagnostic_binding = self._bindings.get("heybox_model_transport")
+        diagnostic_current = bool(diagnostic_binding is not None
+            and getattr(diagnostic_binding["object"], diagnostic_binding["name"], None)
+                is diagnostic_binding["wrapped"])
         stale = sorted(key for key, item in self._bindings.items()
-                       if getattr(item["object"], item["name"], None) is not item["wrapped"])
+                       if key != "heybox_model_transport"
+                       and getattr(item["object"], item["name"], None) is not item["wrapped"])
         return {"installed": self._active, "ready": self._active and not self._missing and not stale,
-                "bindings": len(self._bindings) - len(stale), "missing_targets": list(self._missing),
-                "stale_targets": stale, "local_fail_closed": sorted(self._local_blocked),
+                "bindings": len(self._bindings) - len(stale)
+                    - int(diagnostic_binding is not None and not diagnostic_current), "missing_targets": list(self._missing),
+                "stale_targets": stale, "local_fail_closed": sorted(self._local_features()),
                 "new_content_retry_ready": self._retry_available,
-                "native_feed_identity": self._native_feed_status()}
+                "native_feed_identity": self._native_feed_status(),
+                "model_http_pool": self._model_http_pool_status(),
+                "bili_following_source": self._bili_following_source_status(),
+                "model_transport_diagnostics": {
+                    "schema": 1, "nonstream_only": True,
+                    "active": bool(self._model_transport_diagnostics is not None
+                                   and self._model_transport_diagnostics.active),
+                    "call_binding_current": diagnostic_current}}
 
     def restore(self):
         global _ACTIVE_INCIDENT_HOOKS
         if self._active:
             self._active = False
+            try:
+                if self._model_transport_diagnostics is not None:
+                    self._model_transport_diagnostics.close()
+            except Exception:
+                pass
             for binding in reversed(tuple(self._bindings.values())):
                 self._restore_binding(binding)
             self._bindings.clear()

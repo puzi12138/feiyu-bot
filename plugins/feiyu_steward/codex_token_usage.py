@@ -25,17 +25,11 @@ PRICE_COLUMNS = (
     "model_id", "requested_model", "upstream_model", "service_tier",
     "requested_service_tier", "response_service_tier",
 )
-PROJECT_THREADS = {
-    "01a158bc-e697-76c3-ae8d-f4122db09b1a": "feiyu_bot",
-    "01a16428-9ae2-74b1-9877-12e97cee8a26": "academic_poc",
-}
-PROJECT_LABELS = {"feiyu_bot": "肥鱼相关", "academic_poc": "论文", "other": "其他", "unclassified": "未归类"}
+PROJECT_THREADS = {}  # Configure private project membership locally.
+PROJECT_LABELS = {"feiyu_bot": "项目A", "academic_poc": "项目B", "other": "其他", "unclassified": "未归类"}
 # These are explicit project roots, not names inferred from a directory or a
 # conversation.  Other project roots must also be explicitly established.
-PROJECT_PATHS = {
-    "feiyu_bot": str(Path.home() / "Documents" / "Codex" / "2026-10-20" / "github-astrbot-snowluma-qq"),
-    "academic_poc": r"D:\academic",
-}
+PROJECT_PATHS = {}  # Configure private project membership locally.
 OTHER_PROJECT_PATHS = ()
 THREAD_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 # Model usage is independent of whether a dated tariff is available. Keep

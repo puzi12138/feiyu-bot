@@ -1,7 +1,7 @@
 {
   "name": "dsh-video-storyboard",
-  "version": "0.5.12",
-  "description": "Scene-aware storyboard for DeepSeek Harness: one addressable grid per video (numbered cells, timestamps, transcript, audio envelope) so a text-only agent can look at the video itself instead of being told a summary.",
+  "version": "0.7.5",
+  "description": "Turn a video into storyboard images you can cite: one frame per shot, cell size follows cut density (1/1 … 1/8), row-packed into as few images as possible, with a timestamped index the model can quote and a tier map it can override.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -9,6 +9,8 @@
     "video",
     "storyboard",
     "contact-sheet",
+    "shot-detection",
+    "scene-detection",
     "ffmpeg",
     "multimodal",
     "asr"
@@ -22,11 +24,46 @@
     "url": "git+https://github.com/SAOS-3624/dsh-video-storyboard.git"
   },
   "author": "SAOS-3624",
+  "contributors": [
+    {
+      "name": "ggfgfgf-on",
+      "url": "https://github.com/ggfgfgf-on"
+    },
+    {
+      "name": "dugu951",
+      "url": "https://github.com/dugu951"
+    },
+    {
+      "name": "canyueY",
+      "url": "https://github.com/canyueY"
+    },
+    {
+      "name": "xingyueDanYang",
+      "url": "https://github.com/xingyueDanYang"
+    },
+    {
+      "name": "aizhimoran",
+      "url": "https://github.com/aizhimoran"
+    },
+    {
+      "name": "MULINXF",
+      "url": "https://github.com/MULINXF"
+    },
+    {
+      "name": "viwe-monai",
+      "url": "https://github.com/viwe-monai"
+    },
+    {
+      "name": "opcXopc",
+      "url": "https://github.com/opcXopc"
+    }
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
+    "./client": "./lib/client.js",
     "./plan": "./src/storyboard/plan.js",
     "./scan": "./src/storyboard/scan.js",
     "./segments": "./src/storyboard/segments.js",
@@ -45,18 +82,23 @@
     "./ytdlp": "./src/storyboard/ytdlp.js",
     "./python": "./src/storyboard/python.js",
     "./browser-time": "./src/storyboard/browser-time.js",
-    "./transcript-pass": "./src/storyboard/transcript-pass.js"
+    "./transcript-pass": "./src/storyboard/transcript-pass.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "bin": {
     "dsh-video-scan": "./bin/scan-video.mjs",
+    "dsh-video-probe": "./bin/probe.mjs",
     "dsh-video-storyboard": "./bin/storyboard.mjs",
     "dsh-video-doctor": "./bin/doctor.mjs"
   },
   "files": [
     "src",
+    "lib",
     "bin",
     "scripts",
     "docs",
+    "locale",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
@@ -71,10 +113,12 @@
   },
   "scripts": {
     "test": "node --test",
-    "prepublishOnly": "npm test",
+    "prepublishOnly": "node scripts/guard-publish.mjs && npm test",
     "check": "node scripts/check-syntax.mjs",
     "doctor": "node bin/doctor.mjs",
-    "asrcheck": "node bin/asr-check.mjs"
+    "asrcheck": "node bin/asr-check.mjs",
+    "guard": "node scripts/guard-publish.mjs",
+    "verify-tokens": "node scripts/verify-image-tokens.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.7"
@@ -87,6 +131,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   }
 }

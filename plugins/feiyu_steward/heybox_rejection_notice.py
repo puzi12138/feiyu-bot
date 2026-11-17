@@ -35,7 +35,8 @@ _NOTICE_ID = re.compile(r"heybox-reject:[a-f0-9]{32}\Z")
 _INCIDENT_ID = re.compile(r"[a-f0-9]{32}\Z")
 _MESSAGE_ID = re.compile(r"[1-9]\d{0,23}\Z")
 _STAGES = frozenset({"reply_send", "notice_event"})
-_REASONS = {"platform_content_rejected": "平台拒绝了这条评论内容"}
+_REASONS = {"platform_content_rejected": "平台拒绝了这条评论内容",
+            "platform_target_deleted": "平台提示相关内容已被删除"}
 _NOTIFICATION = frozenset({"not_attempted", "pending", "sent", "unknown"})
 _F060_CATEGORIES = frozenset({
     "vision_failed", "model_failed", "model_connection_failed", "model_timeout", "request_failed",
@@ -93,8 +94,11 @@ def _safe_stamp(value: Any) -> bool:
 def _fixed_text(row: dict[str, Any] | sqlite3.Row) -> str:
     """Build the only text this policy may authorize for owner delivery."""
     reason = _REASONS[row["reason"]]
+    introduction = ("主人，小黑盒平台提示相关内容已被删除，我已跳过这条评论，不会重试。\n"
+                    if row["reason"] == "platform_target_deleted" else
+                    "主人，小黑盒平台拒绝了一条评论，我已单独隔离，不会重试这条评论。\n")
     return (
-        "主人，小黑盒平台拒绝了一条评论，我已单独隔离，不会重试这条评论。\n"
+        introduction +
         "后续新帖会继续按现有保护检查处理。\n"
         f"原因：{reason}\n"
         f"事件编号：{row['event_id']}\n出站编号：{row['outgoing_id']}\n"

@@ -97,6 +97,10 @@ class PlatformContentRejectedError(XiaoheiheApiError):
     """The platform explicitly rejected this comment, without a send receipt."""
 
 
+class PlatformTargetDeletedError(XiaoheiheApiError):
+    """The platform explicitly reports deleted content for this comment target."""
+
+
 class RequestNotAuthorized(RuntimeError):
     """An event-specific guard denied the protected request or read processing."""
 
@@ -587,6 +591,15 @@ class XiaoheiheApiClient:
                     )
                     self._remember_error(error)
                     raise error
+                if _is_platform_target_deleted(name, payload):
+                    error = PlatformTargetDeletedError(
+                        "小黑盒平台提示相关内容已被删除；已保留失败记录，不会重试这条评论。",
+                        status_code=response.status_code,
+                        category="platform_target_deleted",
+                        details={"reason": "explicit_comment_target_deleted", "has_receipt": False},
+                    )
+                    self._remember_error(error)
+                    raise error
                 credential_invalid = _is_relogin_response(payload)
                 error_type = CredentialInvalidError if credential_invalid else XiaoheiheApiError
                 error = error_type(
@@ -713,7 +726,17 @@ def _upstream_error(payload: Mapping[str, Any]) -> str:
 
 
 def _is_platform_content_rejected(name: EndpointName, payload: Mapping[str, Any]) -> bool:
-    """Recognize only the observed, explicit comment refusal contract.
+    """Recognize only the observed, explicit content-rule refusal."""
+    return _is_explicit_comment_rejected(name, payload, "您的发言中带有违规屏蔽词，无法发送")
+
+
+def _is_platform_target_deleted(name: EndpointName, payload: Mapping[str, Any]) -> bool:
+    """Recognize only the exact deleted-content message, without a receipt."""
+    return _is_explicit_comment_rejected(name, payload, "该内容已被删除")
+
+
+def _is_explicit_comment_rejected(name: EndpointName, payload: Mapping[str, Any], expected_message: str) -> bool:
+    """Validate the same strict envelope for either fixed comment refusal.
 
     This is not a banned-word detector. Unknown messages, conflicting success
     evidence, account/rate errors, and malformed or oversized structures stay
@@ -728,7 +751,7 @@ def _is_platform_content_rejected(name: EndpointName, payload: Mapping[str, Any]
         return False
     messages = [payload[key] for key in ("msg", "message", "error")
                 if key in payload and payload[key] not in (None, "")]
-    if not messages or any(type(value) is not str or value.strip() != "您的发言中带有违规屏蔽词，无法发送"
+    if not messages or any(type(value) is not str or value.strip() != expected_message
                            for value in messages):
         return False
     receipt_fields = frozenset({

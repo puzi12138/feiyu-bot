@@ -7,10 +7,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import { access, readdir, rm, stat } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { access, readdir, rm, stat, statfs } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { configuredText, readVideoFile } from './user-config.js';
 
 /** 文件在不在、可不可读。**一行一个坑**：裸 access() 抛异常，用 try 包住才是判断而不是报错。 */
 export async function fileExists(path) {
@@ -29,12 +30,17 @@ export const DEFAULT_MEDIA_MAX_MB = 300;
 /* ------------------------------------------------------------------ 媒体缓存 */
 
 export function mediaDir(env = process.env) {
-  return env[MEDIA_ENV] || join(tmpdir(), 'dsh-video-storyboard', 'media');
+  const configured = configuredText(readVideoFile(env), 'mediaDir');
+  return env[MEDIA_ENV] || configured || join(tmpdir(), 'dsh-video-storyboard', 'media');
 }
 
 export function mediaMaxBytes(env = process.env) {
-  const mb = Number(env[MEDIA_MAX_MB_ENV]);
-  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_MEDIA_MAX_MB) * 1024 * 1024;
+  const fromEnv = Number(env[MEDIA_MAX_MB_ENV]);
+  const fromConfig = Number(readVideoFile(env).mediaMaxMb);
+  const mb = Number.isFinite(fromEnv) && fromEnv > 0
+    ? fromEnv
+    : Number.isFinite(fromConfig) && fromConfig > 0 ? fromConfig : DEFAULT_MEDIA_MAX_MB;
+  return mb * 1024 * 1024;
 }
 
 /** 缓存键：归一化链接 + 落盘清晰度。**路径必须稳定**，否则下游的 sha1(路径+窗口) 会全部失效。 */
@@ -65,26 +71,43 @@ async function dirSize(dir) {
 /**
  * 超限就**按 mtime 从旧到新**删整个 `<key>/` 目录。
  * 单个目录一起删，不留半个视频——否则下次会命中一个没有 video.mp4 的空壳。
+ *
+ * ## 两条不能省的护栏（issue #81）
+ *
+ * 1. **最新那个目录永远不删。** 它就是这一轮刚下好的片子。长片的 720p 副本
+ *    本身就超过上限（实测 72 分钟 544 MB > 300 MB），只按"总量超了就删最旧的"
+ *    会在下载完成的下一行把正在用的文件删掉，然后 `ffprobe: No such file`。
+ *    保它意味着这一轮之后缓存可能仍然超限 —— 那也比"刚下完就删"好。
+ * 2. `exclude`：调用方明确知道"这个目录正在用"时直接跳过，连统计都不算它。
+ *    两处保险叠在一起，是因为 `pipeline.js` 的 `pruneStorage()` 不传 `exclude`
+ *    也照样要安全。
+ *
+ * @param {{dir?: string, maxBytes?: number, exclude?: string|null}} [o]
  */
-export async function pruneMedia({ dir = mediaDir(), maxBytes = mediaMaxBytes() } = {}) {
+export async function pruneMedia({ dir = mediaDir(), maxBytes = mediaMaxBytes(), exclude = null } = {}) {
   let entries = [];
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
     return { removed: 0, bytes: 0 };
   }
+  const skip = exclude ? resolve(exclude) : null;
   const dirs = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const path = join(dir, entry.name);
+    if (skip && resolve(path) === skip) continue;
     const { total, newest } = await dirSize(path);
     if (total > 0) dirs.push({ path, size: total, at: newest });
   }
   dirs.sort((a, b) => a.at - b.at);
+  // 调用方点了名就保它；没点名才退回"保最新的那个"（`pruneStorage()` 走这条）。
+  const keep = skip ?? (dirs.length > 0 ? dirs[dirs.length - 1].path : null);
   let total = dirs.reduce((n, d) => n + d.size, 0);
   let removed = 0;
   for (const d of dirs) {
     if (total <= maxBytes) break;
+    if (keep && d.path === keep) continue;
     try {
       await rm(d.path, { recursive: true, force: true });
       total -= d.size;
@@ -94,11 +117,22 @@ export async function pruneMedia({ dir = mediaDir(), maxBytes = mediaMaxBytes() 
   return { removed, bytes: total };
 }
 
-/** 磁盘剩余空间（字节）。拿不到就返回 null，由调用方决定是否放行。 */
-export async function freeBytes() {
+/** 找到第一个存在的祖先目录：媒体目录还没建时，statfs 也要落在那块盘上。 */
+function existingAncestor(path) {
+  let probe = path;
+  while (probe) {
+    if (existsSync(probe)) return probe;
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  return null;
+}
+
+/** 磁盘剩余空间（字节）。**按目标目录所在的盘**算，不是系统临时目录。 */
+export async function freeBytes(dir = mediaDir(), { statfs: statfsFn = statfs } = {}) {
   try {
-    const { statfs } = await import('node:fs/promises');
-    const s = await statfs(tmpdir());
+    const s = await statfsFn(existingAncestor(dir) ?? tmpdir());
     return Number(s.bavail) * Number(s.bsize);
   } catch {
     return null;

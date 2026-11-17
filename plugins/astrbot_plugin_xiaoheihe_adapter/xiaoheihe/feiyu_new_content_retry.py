@@ -77,3 +77,13 @@ async def wait_feed_delay(adapter, feed, delay):
                 waiter.cancel()
             await asyncio.gather(*waiters, return_exceptions=True)
     return False
+
+
+def report_discovery_result(feed, cycle):
+    """Report fixed cycle metadata to an already loaded owner, if supported."""
+    try:
+        module = sys.modules.get("data.plugins.feiyu_steward.incident_hooks")
+        complete = getattr(module, "complete_heybox_retry_discovery", None)
+        return callable(complete) and complete(feed, cycle) is True
+    except Exception:
+        return False

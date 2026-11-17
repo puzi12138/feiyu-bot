@@ -14,7 +14,15 @@ try {
     if (Buffer.byteLength(input) > 180000) throw new Error('INPUT_TOO_LARGE');
   }
   const request = JSON.parse(input);
+  const retryVideo = request.automaticViewFailure === true && request.action === 'read'
+    && request.arguments && typeof request.arguments === 'object' && !Array.isArray(request.arguments)
+    && Object.keys(request.arguments).every(key => ['video', 'page'].includes(key))
+    && /^BV[0-9A-Za-z]{10}$/.test(request.arguments.video)
+    && (request.arguments.page === undefined || request.arguments.page === 1)
+      ? request.arguments.video : undefined;
   const config = JSON.parse(readFileSync(resolve(root, 'config/bili-humanism.json'), 'utf8'));
+  // Trusted bridge scope only; tool arguments cannot opt into transport reconnects.
+  config._astrbotReadViewReconnect = request.action === 'read';
   // Credentials stay in private local files, never command arguments or model input.
   const existing = JSON.parse(readFileSync(resolve(root, 'data/astrbot/config/astrbot_plugin_bilibili_ai_bot_config.json'), 'utf8').replace(/^\uFEFF/, ''));
   if (existing.SESSDATA) {
@@ -26,7 +34,7 @@ try {
   if (request.action === 'read') {
     try {
       const { createReadTransportDiagnostics } = await import('./BiliReadTransportDiagnostics.mjs');
-      diagnostics = createReadTransportDiagnostics({ action: request.action, dataDir: config.dataDir });
+      diagnostics = createReadTransportDiagnostics({ action: request.action, dataDir: config.dataDir, retryVideo });
       const originalFetch = globalThis.fetch;
       const observedFetch = diagnostics.wrapFetch(originalFetch);
       restoreFetch = () => { if (globalThis.fetch === observedFetch) globalThis.fetch = originalFetch; };
@@ -46,7 +54,21 @@ try {
     const name = 'bili_humanism_' + request.action;
     const tool = tools.get(name);
     if (!tool) throw new Error('UNAVAILABLE_TOOL');
-    const result = await tool.execute(request.arguments || {}, {});
+    let result = await tool.execute(request.arguments || {}, {});
+    try {
+      const value = JSON.parse(result);
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        // Upstream output never supplies a capability. Strip reserved fields
+        // before considering only this bridge's current in-memory observation.
+        const reserved = Object.hasOwn(value, '_astrbot_view_failure') || Object.hasOwn(value, '_bili_view_failure');
+        delete value._astrbot_view_failure;
+        delete value._bili_view_failure;
+        const clean = reserved ? JSON.stringify(value) : result;
+        result = clean;
+        const receipt = diagnostics?.takeViewFailure(clean);
+        result = receipt ? JSON.stringify({ ...value, _astrbot_view_failure: receipt }) : clean;
+      }
+    } catch { /* A missing receipt leaves the existing pause behavior. */ }
     try { diagnostics?.finish(result); } catch {}
     process.stdout.write(result);
   }

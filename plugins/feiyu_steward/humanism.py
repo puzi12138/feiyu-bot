@@ -72,6 +72,55 @@ _CRON_PUBLIC_QUOTE_HINT = (
 )
 
 
+class _BiliViewFailure:
+    """One local capability bound to the exact current subprocess result."""
+
+    __slots__ = ("result", "bvid", "kind", "consumed")
+
+    def __init__(self, result, bvid, kind):
+        self.result, self.bvid, self.kind, self.consumed = result, bvid, kind, False
+
+
+def _consume_bili_view_failure(result, bvid):
+    """Consume a current-call capability; copied/JSON/old receipts fail closed."""
+    if type(result) is not dict:
+        return None
+    capability = result.pop("_bili_view_failure", None)
+    if (type(capability) is not _BiliViewFailure or capability.consumed
+            or capability.result is not result or capability.bvid != bvid
+            or capability.kind not in {"connection", "timeout"}):
+        return None
+    capability.consumed = True
+    capability.result = None
+    return capability.kind
+
+
+def _bind_bili_view_failure(result, arguments, *, automatic, returncode):
+    """Strip a bridge receipt and privately bind only this successful call."""
+    if type(result) is not dict:
+        return result
+    # Flags cover this bridge's wrapped fetch observations through its tool
+    # result, not proxy CONNECT responses or independent asynchronous I/O.
+    receipt = result.pop("_astrbot_view_failure", None)
+    result.pop("_bili_view_failure", None)
+    if (automatic is not True or returncode != 0 or type(arguments) is not dict
+            or set(arguments) - {"video", "page"}
+            or type(arguments.get("video")) is not str
+            or re.fullmatch(r"BV[0-9A-Za-z]{10}", arguments["video"]) is None
+            or arguments.get("page", 1) != 1 or type(arguments.get("page", 1)) is not int
+            or result.get("error") != "NETWORK_FAILED" or set(result) - {"error", "message"}
+            or type(receipt) is not dict or set(receipt) != {
+                "version", "endpoint", "page", "attempts", "kind", "no_http_response", "no_followup"}
+            or type(receipt.get("version")) is not int or receipt["version"] != 1
+            or receipt.get("endpoint") != "view" or type(receipt.get("page")) is not int
+            or receipt["page"] != 1 or type(receipt.get("attempts")) is not int or receipt["attempts"] != 2
+            or type(receipt.get("kind")) is not str or receipt["kind"] not in {"connection", "timeout"}
+            or receipt.get("no_http_response") is not True or receipt.get("no_followup") is not True):
+        return result
+    result["_bili_view_failure"] = _BiliViewFailure(result, arguments["video"], receipt["kind"])
+    return result
+
+
 async def _stop_humanism_process(process):
     try:
         process.kill()
@@ -280,8 +329,11 @@ class BiliHumanism:
             return local_recent_readings(
                 Path(__file__).resolve().parents[4], arguments.get("limit", 3)
             )
+        call_arguments = arguments.copy() if type(arguments) is dict else arguments
         body = json.dumps(
-            {"action": action, "arguments": arguments or {}}, ensure_ascii=False
+            {"action": action, "arguments": call_arguments or {},
+             **({"automaticViewFailure": True} if _automatic and action == "read" else {})},
+            ensure_ascii=False,
         ).encode()
         if len(body) > 180000:
             return {"error": "INPUT_TOO_LARGE"}
@@ -369,6 +421,10 @@ class BiliHumanism:
                     result = {"error": "OUTPUT_TOO_LARGE"}
                 else:
                     result = json.loads(output)
+                result = _bind_bili_view_failure(
+                    result, call_arguments, automatic=_automatic and action == "read",
+                    returncode=process.returncode,
+                )
                 if cron_scope is not None:
                     if action == "journal":
                         try:

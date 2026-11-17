@@ -35,6 +35,7 @@ OWNER = "0"
 BOT_QQ = "0"
 from .token_usage_intent import WINDOW_ROUTE_PATTERN, resolve_usage_intent
 from .token_usage_diagnostics import record_usage_diagnostic, safe_reason
+from .state_recovery import recovery_boundary, recovery_held
 
 
 def parse_usage_window(text):
@@ -481,6 +482,14 @@ class TokenAccounting(OfficialTokenDelivery, TokenReportDelivery):
         if now.tzinfo is None:
             raise ValueError("timezone_required")
         now = now.astimezone(TZ)
+        state_identity = id(self.state)
+        boundary = recovery_boundary(self.state, "token_usage_reports")
+        if (recovery_held(self.state, "token_usage_reports")
+                or boundary is not None and (
+                    now.timestamp() < boundary["not_before"]
+                    or (now.date() - timedelta(days=1))
+                    < datetime.fromtimestamp(boundary["since"], TZ).date())):
+            return {"ok": False, "sent": False, "status": "state_recovery_hold"}
         if automatic_peak_paused(now.timestamp()):
             return {"ok": True, "sent": False, "status": "peak_tariff"}
         activation = self.state.get("feiyu_local_daily_start_date_v1")
@@ -521,6 +530,10 @@ class TokenAccounting(OfficialTokenDelivery, TokenReportDelivery):
             return {"ok": False, "sent": False, "status": "local_report_interval_mismatch"}
         if automatic_peak_paused():
             return {"ok": True, "sent": False, "status": "peak_tariff", "day": day}
+        if (recovery_held(self.state, "token_usage_reports")
+                or id(self.state) != state_identity
+                or recovery_boundary(self.state, "token_usage_reports") != boundary):
+            return {"ok": False, "sent": False, "status": "state_recovery_hold"}
         return await self.send_official_token_report(None, result, source="daily", daily_day=identity, dry_run=dry_run)
 
     async def retry_pending_token_reports(self, *, now=None, limit=4):

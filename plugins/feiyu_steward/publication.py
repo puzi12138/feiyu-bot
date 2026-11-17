@@ -15,6 +15,7 @@ from .heybox_owner_share import heybox_owner_off_peak
 from .policy import TZ, delivery_block
 from .public_comment_guard import internal_comment_reason
 from .share_cards import build_share_segment, canonical_share_url
+from .state_recovery import recovery_boundary, recovery_held
 
 
 async def _notice_segments(batch, prefix):
@@ -52,6 +53,12 @@ class PublicationNotifications:
         A separate decision cache lets a manual local request still inspect all
         receipts. A failed classifier is retried later, never every minute.
         """
+        state_identity = id(self.state)
+        boundary = recovery_boundary(self.state, "publication_notices")
+        if (recovery_held(self.state, "publication_notices")
+                or getattr(self, "_group_provider_terminated", True) is not False
+                or boundary is not None and time.time() < boundary["not_before"]):
+            return []
         if not heybox_owner_off_peak():
             return [row for row in notices if not row["key"].startswith("heybox:")]
         now = time.time()
@@ -61,10 +68,18 @@ class PublicationNotifications:
         pending = [row for row in heybox if row["key"] not in decisions
                    or (decisions[row["key"]].get("status") == "retry"
                        and decisions[row["key"]].get("retry_at", 0) <= now)][:8]
+        if boundary is not None:
+            pending = [row for row in pending if type(row.get("at")) in (int, float)
+                       and boundary["since"] < row["at"] <= now]
         if pending:
             try:
-                answer = await asyncio.wait_for(
-                    self.context.get_provider_by_id("deepseek-flash").text_chat(
+                async def classify_current():
+                    if (id(self.state) != state_identity
+                            or getattr(self, "_group_provider_terminated", True) is not False
+                            or recovery_held(self.state, "publication_notices")
+                            or recovery_boundary(self.state, "publication_notices") != boundary):
+                        return None
+                    return await self.context.get_provider_by_id("deepseek-flash").text_chat(
                         prompt=json.dumps({"comments": [{"key": row["key"],
                             "comment": row["notice_body"][:1200]} for row in pending]}, ensure_ascii=False),
                         contexts=[], system_prompt=(
@@ -76,7 +91,18 @@ class PublicationNotifications:
                             "每批最多精选一条，也可以全部跳过，不为凑数选择，不拿高互动量当有趣。"
                             '只输出JSON：{"exceptional":true或false,"key":"输入中的key或空字符串",'
                             '"reason":"依据评论实际文字说明具体哪里特别有趣，未选择则留空"}。'
-                        ), request_max_retries=0), 45)
+                        ), request_max_retries=0)
+                answer = await asyncio.wait_for(
+                    classify_current(), 45)
+                if (getattr(self, "_group_provider_terminated", True) is not False
+                        or recovery_held(self.state, "publication_notices")
+                        or recovery_boundary(self.state, "publication_notices") != boundary):
+                    return []
+                if (id(self.state) != state_identity
+                        or getattr(self, "_group_provider_terminated", True) is not False
+                        or recovery_held(self.state, "publication_notices")
+                        or recovery_boundary(self.state, "publication_notices") != boundary):
+                    return []
                 if not heybox_owner_off_peak():
                     return [row for row in notices if not row["key"].startswith("heybox:")]
                 raw = str(getattr(answer, "completion_text", "") or "").strip()
@@ -94,6 +120,11 @@ class PublicationNotifications:
                     decisions[row["key"]] = {"status": "selected" if row["key"] == chosen else "skipped",
                                              "at": now}
             except Exception as error:
+                if (id(self.state) != state_identity
+                        or getattr(self, "_group_provider_terminated", True) is not False
+                        or recovery_held(self.state, "publication_notices")
+                        or recovery_boundary(self.state, "publication_notices") != boundary):
+                    return []
                 if not heybox_owner_off_peak():
                     return [row for row in notices if not row["key"].startswith("heybox:")]
                 for row in pending:
@@ -108,6 +139,12 @@ class PublicationNotifications:
     async def collect_publication_notices(self):
         """Read confirmed Xiaoheihe and Qzone writes; Bili uses its own @ only."""
         cutoff = self.state.get("publication_notice_since", time.time())
+        state_identity = id(self.state)
+        boundary = recovery_boundary(self.state, "publication_notices")
+        if boundary is not None:
+            if time.time() < boundary["not_before"]:
+                return []
+            cutoff = max(cutoff, boundary["since"])
         notices = []
         diagnostics = self.state.setdefault("publication_sources", {})
         plugin = self.plugin("astrbot_plugin_xiaoheihe_adapter")
@@ -165,11 +202,24 @@ class PublicationNotifications:
         ledger = self.state.setdefault("publication_notices", {})
         # Persisted sending/unknown rows are also reserved: do not blindly resend.
         unique = {row["key"]: row for row in notices if row["key"] not in ledger}
+        if boundary is not None:
+            # A new observation cannot make an old receipt eligible again.
+            # Use the platform-confirmation/candidate-creation stamp, not now.
+            now = time.time()
+            unique = {key: row for key, row in unique.items()
+                      if type(row.get("at")) in (int, float)
+                      and boundary["since"] < row["at"] <= now}
         return sorted(unique.values(),
                       key=lambda row: (row["at"], row["key"]))
 
     async def send_publication_notifications(self, *, dry_run=False, manual=False):
         """One bounded batch, shared private gap, and actual QQ message ID."""
+        state_identity = id(self.state)
+        boundary = recovery_boundary(self.state, "publication_notices")
+        if (recovery_held(self.state, "publication_notices")
+                or getattr(self, "_group_provider_terminated", True) is not False
+                or boundary is not None and time.time() < boundary["not_before"]):
+            return {"ok": False, "reason": "state_recovery_hold", "sent": False, "count": 0}
         if refresh_availability(self.state, datetime.now(TZ)):
             self.save()
         async with self.lock:
@@ -178,12 +228,22 @@ class PublicationNotifications:
             if block and not dry_run:
                 return {"ok": False, "reason": block, "sent": False, "count": 0}
             notices = await self.collect_publication_notices()
+            if (getattr(self, "_group_provider_terminated", True) is not False
+                    or id(self.state) != state_identity
+                    or recovery_held(self.state, "publication_notices")
+                    or recovery_boundary(self.state, "publication_notices") != boundary):
+                return {"ok": False, "reason": "state_recovery_hold", "sent": False, "count": 0}
             deferred_heybox = False
             if not manual and not heybox_owner_off_peak():
                 deferred_heybox = any(row["key"].startswith("heybox:") for row in notices)
                 notices = [row for row in notices if not row["key"].startswith("heybox:")]
             if self.state.get("heybox_exceptional_private_only", True) and not manual:
                 notices = await self.select_exceptional_heybox_notices(notices, dry_run=dry_run)
+            if (id(self.state) != state_identity
+                    or getattr(self, "_group_provider_terminated", True) is not False
+                    or recovery_held(self.state, "publication_notices")
+                    or recovery_boundary(self.state, "publication_notices") != boundary):
+                return {"ok": False, "reason": "state_recovery_hold", "sent": False, "count": 0}
             if not manual and not heybox_owner_off_peak():
                 deferred_heybox = deferred_heybox or any(
                     row["key"].startswith("heybox:") for row in notices)
@@ -247,6 +307,18 @@ class PublicationNotifications:
             if (not manual and any(row["key"].startswith("heybox:") for row in batch)
                     and not heybox_owner_off_peak()):
                 return {"ok": False, "reason": "heybox_off_peak_required", "sent": False, "count": 0}
+            # Recheck the durable generation after card/status/model awaits,
+            # immediately before reserving and dispatching this one batch.
+            if (recovery_held(self.state, "publication_notices")
+                    or id(self.state) != state_identity
+                    or getattr(self, "_group_provider_terminated", True) is not False
+                    or recovery_boundary(self.state, "publication_notices") != boundary
+                    or boundary is not None and (
+                        time.time() < boundary["not_before"]
+                        or any(type(row.get("at")) not in (int, float)
+                               or not boundary["since"] < row["at"] <= time.time()
+                               for row in batch))):
+                return {"ok": False, "reason": "state_recovery_hold", "sent": False, "count": 0}
             created = datetime.now(TZ)
             ledger = self.state.setdefault("publication_notices", {})
             fingerprint = hashlib.sha256(body.encode()).hexdigest()
@@ -254,8 +326,15 @@ class PublicationNotifications:
                 ledger[row["key"]] = {"status": "sending", "at": created.timestamp(), "hash": fingerprint}
             self.save()
             try:
-                response = await asyncio.wait_for(adapter.get_client().call_action(
-                    "send_private_msg", user_id=0, message=segments), 40)
+                async def send_current():
+                    if (id(self.state) != state_identity
+                            or getattr(self, "_group_provider_terminated", True) is not False
+                            or recovery_held(self.state, "publication_notices")
+                            or recovery_boundary(self.state, "publication_notices") != boundary):
+                        return {}
+                    return await adapter.get_client().call_action(
+                        "send_private_msg", user_id=0, message=segments)
+                response = await asyncio.wait_for(send_current(), 40)
                 message_id = response.get("message_id") if isinstance(response, dict) else None
             except BaseException:
                 for row in batch:

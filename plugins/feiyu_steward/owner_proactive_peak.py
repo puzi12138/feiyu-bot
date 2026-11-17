@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from .availability import refresh_availability
 from .policy import OWNER_UMO, TZ, delivery_block, interest_driven
-from .proactive import chat_block
+from .proactive import _private_recovery_check, chat_block
 from .token_pricing import _peak
 
 
@@ -94,6 +94,10 @@ class OwnerProactivePeak:
                     or not issued_mono <= monotonic < deadline <= issued_mono + _CAPABILITY_SECONDS
                     or _peak(now) is not True):
                 return False
+            recovery_reason, _ = _private_recovery_check(
+                self.state, "chat", now, expected=capability.get("recovery_scope"))
+            if recovery_reason:
+                return False
             if self.state.get("proactive") is not True or self.state.get("dnd", False):
                 return False
             if (not interest_driven(self.state)
@@ -120,6 +124,9 @@ class OwnerProactivePeak:
                 or getattr(self, "_owner_peak_capability", None) is not None):
             return {"ok": False, "reason": "peak_owner_task_required"}
         now = datetime.now(TZ)
+        reason, recovery_scope = _private_recovery_check(self.state, "chat", now.timestamp())
+        if reason:
+            return {"ok": False, "reason": reason}
         if _peak(now.timestamp()) is not True:
             return {"ok": False, "reason": "verified_peak_required"}
         if refresh_availability(self.state, now):
@@ -133,6 +140,7 @@ class OwnerProactivePeak:
         wall, monotonic = time.time(), time.monotonic()
         capability = {
             "purpose": _PURPOSE, "origin": OWNER_UMO, "task": task, "active": True,
+            "recovery_scope": recovery_scope,
             "issued_at": wall, "expires_at": wall + _CAPABILITY_SECONDS,
             "issued_mono": monotonic, "deadline_mono": monotonic + _CAPABILITY_SECONDS,
             "phase": "between", "provider": bindings[0], "sdk_parent": bindings[1],
@@ -169,7 +177,10 @@ class OwnerProactivePeak:
                     now = time.time()
                     status = self._owner_peak_monitor_status
                     status["guard_ready"] = self._owner_peak_bindings() is not None
-                    if _peak(now) is True:
+                    recovery_reason, _ = _private_recovery_check(self.state, "chat", now)
+                    if recovery_reason:
+                        status["last_decision"] = recovery_reason
+                    if not recovery_reason and _peak(now) is True:
                         slot = int(now // _SLOT_SECONDS)
                         run = False
                         async with self.lock:

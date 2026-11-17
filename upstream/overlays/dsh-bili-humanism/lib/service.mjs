@@ -122,6 +122,9 @@ export class Service {
   }
   async read(input, page, signal) {
     return this.task(async (network) => {
+      // Only this read task receives one reconnect; other operations stay single-shot.
+      network.readViewReconnectsRemaining =
+        this.config._astrbotReadViewReconnect === true ? 1 : 0;
       const reading = await readVideo(input, page, network, this.store);
       return this.store.saveReading(reading);
     }, signal);

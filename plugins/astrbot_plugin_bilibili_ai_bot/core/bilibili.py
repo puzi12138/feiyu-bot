@@ -1,11 +1,12 @@
 """B站 API 交互：Cookie管理、WBI签名、扫码登录、评论、视频信息、互动。"""
 import json
+import asyncio
 import re
 import time
 import hashlib
 import uuid
 import aiohttp
-from .network import plugin_http_session
+from .network import FollowingReadHttpError, FollowingReadPaused, following_read_scope, plugin_http_session
 from functools import reduce
 from astrbot.api import logger
 from .config import (
@@ -17,6 +18,41 @@ from .config import (
     MIXIN_KEY_ENC_TAB, USER_AGENT,
 )
 import os
+
+
+class FollowingReadError(RuntimeError):
+    """Fixed, content-free classifications for incomplete following reads."""
+
+    def __init__(self, reason, *, http_status=None, api_code=None):
+        allowed = {
+            "invalid_uid", "budget_exhausted", "request_failed", "http_failed",
+            "invalid_response", "api_error", "page_limit", "total_changed",
+            "duplicate_uid", "count_mismatch", "incomplete",
+        }
+        reason = reason if reason in allowed else "invalid_response"
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        self.api_code = api_code if type(api_code) is int and abs(api_code) <= 1000000 else None
+        category = "response_invalid"
+        if reason == "invalid_uid":
+            category = "request_rejected"
+        elif reason in {"budget_exhausted", "page_limit"}:
+            category = "request_failed"
+        elif reason == "request_failed":
+            category = "connection_failed"
+        elif reason == "api_error":
+            category = ({-101: "credential_invalid", -102: "access_denied",
+                         -403: "access_denied", -352: "rate_limited",
+                         -412: "rate_limited", -509: "rate_limited"}
+                        .get(self.api_code, "request_rejected"))
+        elif reason == "http_failed":
+            category = ({401: "credential_invalid", 403: "access_denied",
+                         412: "rate_limited", 429: "rate_limited"}
+                        .get(self.http_status, "service_unavailable"
+                             if self.http_status is not None and self.http_status >= 500
+                             else "request_failed"))
+        self.category = category
+        suffix = f":{self.api_code}" if reason == "api_error" and self.api_code is not None else ""
+        super().__init__(f"bili_followings_{reason}{suffix}")
 
 
 class BilibiliAPIMixin:
@@ -405,14 +441,163 @@ class BilibiliAPIMixin:
 
     # ── 关注列表 ──
     async def get_followings(self, mid=None):
-        target = mid or self.config.get("DEDE_USER_ID", "")
+        """Return a complete bounded UID list; incomplete reads are never empty."""
+        target = self.config.get("DEDE_USER_ID", "") if mid is None else mid
+        if type(target) not in (int, str):
+            raise FollowingReadError("invalid_uid")
+        target_text = str(target).strip()
+        if (not target_text.isascii() or not target_text.isdigit()
+                or len(target_text) > 20):
+            raise FollowingReadError("invalid_uid")
+        target = int(target_text)
+        if target <= 0:
+            raise FollowingReadError("invalid_uid")
+
+        # Bound this read operation; downstream UP scanning is unchanged.
+        # No partial cache or additional background task is introduced.
+        page_size, max_pages = 50, 20
+        deadline = time.monotonic() + 15.0
+        async def read_all():
+            # One session and at most one application-level reconnect per list.
+            # The aiohttp library's existing GET behaviour is unchanged.
+            import ssl
+
+            expected_total = None
+            result, seen = [], set()
+            reconnect_used = False
+            async with plugin_http_session(self.config) as session:
+                async def read_page(page, remaining):
+                    nonlocal reconnect_used
+                    page_deadline = min(deadline, time.monotonic() + min(10.0, remaining))
+                    while True:
+                        page_remaining = page_deadline - time.monotonic()
+                        if page_remaining <= 0:
+                            raise asyncio.TimeoutError()
+                        response_received = False
+                        try:
+                            with following_read_scope():
+                                async with session.get(
+                                    "https://api.bilibili.com/x/relation/followings",
+                                    headers=self._headers(),
+                                    params={"vmid": target, "ps": page_size, "pn": page},
+                                    timeout=aiohttp.ClientTimeout(total=page_remaining),
+                                ) as response:
+                                    response_received = True
+                                    data = await response.json(content_type=None)
+                                    if (isinstance(data, dict) and data.get("code") == -352
+                                            and getattr(self, "_wbi_keys_cache", None)):
+                                        self._wbi_keys_cache = None
+                                        logger.warning("[BiliBot] 收到 -352 风控码，已清除 WBI key 缓存待下次重签")
+                                    return data, getattr(response, "status", None)
+                        except (aiohttp.ClientConnectorError, aiohttp.ClientOSError,
+                                aiohttp.ServerDisconnectedError) as error:
+                            # Only the exact structured TLS EOF is retryable; never
+                            # retry certificate, hostname or other TLS failures.
+                            structured_eof = (
+                                isinstance(error, aiohttp.ClientConnectorSSLError)
+                                and isinstance(error.os_error, ssl.SSLEOFError)
+                            )
+                            related = (getattr(error, "os_error", None),
+                                       error.__cause__, error.__context__)
+                            foreign_ssl = any(
+                                isinstance(item, ssl.SSLError)
+                                and not (structured_eof and isinstance(item, ssl.SSLEOFError))
+                                for item in related
+                            )
+                            if (response_received or reconnect_used
+                                    or isinstance(error, (aiohttp.ClientResponseError, TimeoutError))
+                                    or isinstance(error, aiohttp.ClientConnectorCertificateError)
+                                    or any(isinstance(item, (TimeoutError, aiohttp.ClientResponseError))
+                                           for item in related)
+                                    or foreign_ssl
+                                    or (isinstance(error, aiohttp.ClientSSLError) and not structured_eof)
+                                    or page_deadline - time.monotonic() <= 0.25):
+                                raise
+                            reconnect_used = True
+                            await asyncio.sleep(0.25)
+
+                for page in range(1, max_pages + 1):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise FollowingReadError("budget_exhausted")
+                    try:
+                        d, status = await asyncio.wait_for(read_page(page, remaining), timeout=remaining)
+                    except asyncio.CancelledError:
+                        raise
+                    except FollowingReadPaused:
+                        raise
+                    except FollowingReadHttpError as error:
+                        raise FollowingReadError("http_failed", http_status=error.status) from None
+                    except (asyncio.TimeoutError, TimeoutError):
+                        raise FollowingReadError("budget_exhausted") from None
+                    except (aiohttp.ClientError, OSError):
+                        raise FollowingReadError("request_failed") from None
+                    except Exception:
+                        raise FollowingReadError("invalid_response") from None
+
+                    if type(status) is not int or status != 200:
+                        raise FollowingReadError("http_failed", http_status=status)
+                    if not isinstance(d, dict) or type(d.get("code")) is not int:
+                        raise FollowingReadError("invalid_response")
+                    if d["code"] != 0:
+                        raise FollowingReadError("api_error", api_code=d["code"])
+                    data = d.get("data")
+                    if not isinstance(data, dict):
+                        raise FollowingReadError("invalid_response")
+                    total, items = data.get("total"), data.get("list")
+                    if type(total) is not int or total < 0 or not isinstance(items, list):
+                        raise FollowingReadError("invalid_response")
+                    if total > page_size * max_pages:
+                        raise FollowingReadError("page_limit")
+                    if expected_total is None:
+                        expected_total = total
+                    elif total != expected_total:
+                        raise FollowingReadError("total_changed")
+                    if len(items) > page_size:
+                        raise FollowingReadError("invalid_response")
+
+                    for item in items:
+                        value = item.get("mid") if isinstance(item, dict) else None
+                        if type(value) not in (int, str):
+                            raise FollowingReadError("invalid_response")
+                        value_text = str(value)
+                        if (not value_text.isascii() or not value_text.isdigit()
+                                or len(value_text) > 20):
+                            raise FollowingReadError("invalid_response")
+                        value = int(value_text)
+                        if value <= 0:
+                            raise FollowingReadError("invalid_response")
+                        if value in seen:
+                            raise FollowingReadError("duplicate_uid")
+                        seen.add(value)
+                        result.append(value)
+                    if len(result) > expected_total:
+                        raise FollowingReadError("count_mismatch")
+                    if time.monotonic() >= deadline:
+                        raise FollowingReadError("budget_exhausted")
+                    if len(result) == expected_total:
+                        return result
+                    if len(items) < page_size:
+                        raise FollowingReadError("incomplete")
+                raise FollowingReadError("page_limit")
+
         try:
-            d, _ = await self._http_get("https://api.bilibili.com/x/relation/followings", params={"vmid": target, "ps": 50, "pn": 1})
-            if d["code"] == 0:
-                return [i["mid"] for i in d.get("data", {}).get("list", [])]
-        except Exception as e:
-            logger.error(f"[BiliBot] 获取关注列表失败: {e}")
-        return []
+            # Include session setup and cleanup in the same original 15 s bound.
+            return await asyncio.wait_for(read_all(), timeout=max(0.0, deadline - time.monotonic()))
+        except asyncio.CancelledError:
+            raise
+        except FollowingReadPaused:
+            raise
+        except FollowingReadError:
+            raise
+        except FollowingReadHttpError as error:
+            raise FollowingReadError("http_failed", http_status=error.status) from None
+        except (asyncio.TimeoutError, TimeoutError):
+            raise FollowingReadError("budget_exhausted") from None
+        except (aiohttp.ClientError, OSError):
+            raise FollowingReadError("request_failed") from None
+        except Exception:
+            raise FollowingReadError("invalid_response") from None
 
     # ── 视频信息 ──
     async def _oid_to_bvid(self, oid):

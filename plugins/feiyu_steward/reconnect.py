@@ -18,6 +18,7 @@ from .group_policy import (
     group_risk_assessment,
     install_group_outbound_gate,
 )
+from .state_recovery import recovery_held
 from .policy import OWNER_UMO
 from .peak_policy import PeakTariffPaused, QQChatPaused, blocked_qq_event, peak_active
 from .peak_runtime import business_paused
@@ -289,11 +290,14 @@ class ReconnectRecovery:
         # Store only transport metadata, statuses and hashes, never private text.
         if getattr(self, "_reconnect_terminated", False):
             return
-        cutoff = time.time() - LOOKBACK
-        rows = self.reconnect_state["rows"]
-        self.reconnect_state["rows"] = {k: v for k, v in rows.items() if v["at"] >= cutoff}
-        self.reconnect_state["attempts"] = [a for a in self.reconnect_state["attempts"]
-                                             if a["at"] >= cutoff][-500:]
+        # A stale-state recovery must retain the independent historical ledger.
+        # The ordinary retention policy resumes after that audited hold ends.
+        if not recovery_held(getattr(self, "state", {}), "reconnect_history"):
+            cutoff = time.time() - LOOKBACK
+            rows = self.reconnect_state["rows"]
+            self.reconnect_state["rows"] = {k: v for k, v in rows.items() if v["at"] >= cutoff}
+            self.reconnect_state["attempts"] = [a for a in self.reconnect_state["attempts"]
+                                                 if a["at"] >= cutoff][-500:]
         tmp = self.reconnect_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.reconnect_state, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self.reconnect_path)

@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 from .availability import refresh_availability
+from .state_recovery import recovery_held
 from .policy import (
     PUBLIC_COMMENT_SENSITIVE,
     TZ,
@@ -170,6 +171,8 @@ def owner_mention_block(state, now):
 
 def conversation_block(state, root, now):
     """Bound public followups independently of QQ notifications."""
+    if recovery_held(state, "bili_conversations"):
+        return "state_recovery_hold"
     refresh_availability(state, now)
     if not state.get("bili_conversations"):
         return "disabled"

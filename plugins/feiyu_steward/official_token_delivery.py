@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import re
+import time
 from contextlib import nullcontext
 from datetime import datetime
 
@@ -17,6 +18,7 @@ from .token_report_delivery import LEGACY_QUEUE_STATE, QUEUE_STATE, _body, _rece
 from .token_report_queue import queue_key
 from .bill_display_policy import display_bill_text
 from .peak_runtime import owner_scope_active
+from .state_recovery import recovery_boundary, recovery_held
 
 OWNER = '0'
 BOT_QQ = '0'
@@ -26,6 +28,17 @@ class OfficialTokenDelivery:
     async def send_official_token_report(self, event, result, *, source='manual', daily_day=None, dry_run=False):
         if source not in ('manual', 'daily') or source == 'manual' and not owner_private(event):
             return {'ok': False, 'sent': False, 'queued': False, 'status': 'owner_private_only'}
+        state_identity = id(self.state)
+        boundary = recovery_boundary(self.state, 'token_usage_reports') if source == 'daily' else None
+        if source == 'daily':
+            match = re.fullmatch(r'feiyu_local_v1:(\d{4}-\d{2}-\d{2})', str(daily_day))
+            if (recovery_held(self.state, 'token_usage_reports')
+                    or getattr(self, '_group_provider_terminated', True) is not False
+                    or getattr(self, '_token_usage_stopped', True) is not False
+                    or boundary is not None and (
+                        time.time() < boundary['not_before'] or match is None
+                        or match.group(1) < datetime.fromtimestamp(boundary['since'], TZ).date().isoformat())):
+                return {'ok': False, 'sent': False, 'queued': False, 'status': 'state_recovery_hold'}
         if source == 'daily' and automatic_peak_paused():
             return {'ok': True, 'sent': False, 'queued': False, 'status': 'peak_tariff'}
         mode = result.get('report_mode')
@@ -41,6 +54,13 @@ class OfficialTokenDelivery:
         if mode == COMBINED_MODE and (source != 'manual' or not combined_report_ready(result)):
             return {'ok': False, 'sent': False, 'queued': False, 'status': 'local_report_unavailable'}
         path = await asyncio.to_thread(self.token_usage_report_image, result)
+        if source == 'daily' and (
+                recovery_held(self.state, 'token_usage_reports')
+                or id(self.state) != state_identity
+                or recovery_boundary(self.state, 'token_usage_reports') != boundary
+                or getattr(self, '_group_provider_terminated', True) is not False
+                or getattr(self, '_token_usage_stopped', True) is not False):
+            return {'ok': False, 'sent': False, 'queued': False, 'status': 'state_recovery_hold'}
         if source == 'daily' and automatic_peak_paused():
             return {'ok': True, 'sent': False, 'queued': False, 'status': 'peak_tariff'}
         if dry_run:
@@ -67,6 +87,13 @@ class OfficialTokenDelivery:
             return {'ok': False, 'sent': False, 'queued': False, 'status': 'message_identity_unavailable',
                     'note': '这次请求缺少可核对的消息标识，报告暂未发送。'}
         async with self.token_usage_lock:
+            if source == 'daily' and (
+                    recovery_held(self.state, 'token_usage_reports')
+                    or id(self.state) != state_identity
+                    or recovery_boundary(self.state, 'token_usage_reports') != boundary
+                    or getattr(self, '_group_provider_terminated', True) is not False
+                    or getattr(self, '_token_usage_stopped', True) is not False):
+                return {'ok': False, 'sent': False, 'queued': False, 'status': 'state_recovery_hold'}
             receipts = self.state.setdefault(table, {})
             if not isinstance(receipts, dict):
                 return {'ok': False, 'sent': False, 'queued': False, 'status': 'receipt_store_unavailable',
@@ -106,6 +133,14 @@ class OfficialTokenDelivery:
                         'note': '报告已生成，QQ当前不可发送，请恢复后重新查询。'}
             if source == 'daily' and automatic_peak_paused():
                 return {'ok': True, 'sent': False, 'queued': False, 'status': 'peak_tariff'}
+            if source == 'daily' and (
+                    recovery_held(self.state, 'token_usage_reports')
+                    or id(self.state) != state_identity
+                    or getattr(self, '_group_provider_terminated', True) is not False
+                    or getattr(self, '_token_usage_stopped', True) is not False
+                    or recovery_boundary(self.state, 'token_usage_reports') != boundary
+                    or boundary is not None and time.time() < boundary['not_before']):
+                return {'ok': False, 'sent': False, 'queued': False, 'status': 'state_recovery_hold'}
             receipt = dict(previous) if resume_blocked else {}
             receipt.update({'status': 'intent', 'at': datetime.now(TZ).timestamp(),
                             'format': 'image' if path else 'text', 'report_mode': mode,
@@ -141,7 +176,16 @@ class OfficialTokenDelivery:
                         receipt.update(status='blocked_before_send', peak_guard_v1=True)
                         self.save()
                         return {'ok': True, 'sent': False, 'queued': False, 'status': 'peak_tariff'}
-                    response = _body(await asyncio.wait_for(client.call_action('send_private_msg', user_id=int(OWNER), message=message), 40))
+                    async def send_current():
+                        if source == 'daily' and (
+                                id(self.state) != state_identity
+                                or getattr(self, '_group_provider_terminated', True) is not False
+                                or getattr(self, '_token_usage_stopped', True) is not False
+                                or recovery_held(self.state, 'token_usage_reports')
+                                or recovery_boundary(self.state, 'token_usage_reports') != boundary):
+                            return {}
+                        return await client.call_action('send_private_msg', user_id=int(OWNER), message=message)
+                    response = _body(await asyncio.wait_for(send_current(), 40))
                 message_id = response.get('message_id')
                 valid = type(message_id) in (str, int) and re.fullmatch(r'-?[1-9]\d{0,19}', str(message_id))
                 native_id = response.get('native_message_id') if use_native else None

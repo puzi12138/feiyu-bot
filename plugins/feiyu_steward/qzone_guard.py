@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from datetime import datetime
 from functools import wraps
 
+from .state_recovery import recovery_held
 from .policy import TZ, qzone_publication_usage
 from .peak_policy import PeakTariffPaused
 from .peak_runtime import business_paused
@@ -76,6 +77,8 @@ def install_qzone_publication_guard(steward, qzone):
 
     @wraps(original)
     async def guarded(*args, **kwargs):
+        if recovery_held(steward.state, "qzone_publication"):
+            raise PermissionError("state_recovery_hold")
         if business_paused():
             raise PeakTariffPaused("automatic_qzone_publication_paused_during_peak")
         if _RESERVED_ROUTE.get():

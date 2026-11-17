@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path('D:/QQBot')
@@ -98,8 +99,28 @@ def clean(text, limit=380):
     return result
 
 
+def quiet_heartbeat(raw):
+    """Honor the structured Codex no-notification result before cleaning text."""
+    text = raw.strip()
+    if (len(text) > 16384 or not text.startswith('<heartbeat>')
+            or '<!DOCTYPE' in text or '<!ENTITY' in text):
+        return False
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return False
+    if (root.tag != 'heartbeat' or root.attrib or (root.text or '').strip()
+            or [child.tag for child in root] != ['automation_id', 'decision', 'message']
+            or any(child.attrib or len(child) or (child.tail or '').strip() for child in root)):
+        return False
+    return (re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', (root[0].text or '').strip()) is not None
+            and (root[1].text or '').strip() == 'DONT_NOTIFY')
+
+
 def build_brief(event):
     raw = str(event.get('last-assistant-message') or '')
+    if quiet_heartbeat(raw):
+        return None, 'quiet_heartbeat'
     summary = clean(raw)
     if not summary:
         return None, 'empty_result'

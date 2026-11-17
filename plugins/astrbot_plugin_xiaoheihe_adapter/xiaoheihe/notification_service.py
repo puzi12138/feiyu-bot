@@ -20,6 +20,7 @@ from typing import Any
 from .api_client import RequestNotAuthorized, XiaoheiheApiClient, XiaoheiheApiError
 from .context_builder import BuiltContext, ContextBuilder
 from .feiyu_auto_reply_gate import authorize, block_event, reserve
+from .feiyu_own_comments import OWN_INSTRUCTION, own_comment_scope_state
 from .logging_service import LoggingService
 from .models import EventState, Notification, NotificationType, PermissionDecision
 from .permission_service import PermissionService
@@ -543,7 +544,8 @@ class NotificationService:
                 should_filter=True,
             )
             return
-        allowed, reason, preserve = await reserve(self.repository, event_id, notification)
+        allowed, reason, preserve = await reserve(
+            self.repository, event_id, notification, own_comment_service=self)
         if not allowed:
             if not preserve:
                 await block_event(self.repository, event_id, reason)
@@ -561,6 +563,19 @@ class NotificationService:
                 self.client,
                 authorize=context_authorized,
             )
+            own_state = await own_comment_scope_state(self.repository, event_id, notification.route)
+            if own_state is None:
+                await block_event(self.repository, event_id, "own_post_scope_unavailable")
+                return
+            if own_state:
+                credentials = self.client.credentials
+                uid = str(credentials.uid or "") if credentials else ""
+                if (not uid or uid != str(self.permissions.self_uid or "")
+                        or uid != str(context.thread.author_uid or "")
+                        or str(context.thread.post_id or "") != str(notification.post_id)):
+                    await block_event(self.repository, event_id, "own_post_author_unverified")
+                    return
+                context.runtime_context += OWN_INSTRUCTION
             await self.repository.mark_event(event_id, EventState.CONTEXT_READY)
             async with self._floor_lock(notification.route.session_id):
                 await self.repository.record_session(notification.route)

@@ -29,7 +29,7 @@ CATEGORIES = {"vision_failed", "model_failed", "request_failed", "storage_failed
 NOTIFICATIONS = {"pending", "sent", "unknown", "not_requested"}
 ROW_KEYS = {"id", "feature", "category", "stage", "event_digest", "state", "notification",
             "created_at", "resolved_at", "message_id", "receipt_kind"}
-STAGES = {"", "feed_once", "notice_poll", "notice_event", "bili_browse_once", "bili_journal_once",
+STAGES = {"", "feed_once", "notice_poll", "notice_event", "bili_browse_once", "bili_journal_once", "bili_source_read",
           "bili_share_once", "autopost_once", "autopost_send", "qzone_sync_once", "qzone_sync_send",
           "public_send", "reply_send", "friend_time_send"}
 
@@ -88,7 +88,7 @@ def identity(row):
     return None
 
 
-def matches(record, row, exe):
+def matches(record, row, exe, tolerance=0.02):
     try:
         stamp = record.get("CreatedUtc", record.get("Created"))
         if re.search(r"\.[0-9]{7,}", stamp):
@@ -105,15 +105,28 @@ def matches(record, row, exe):
         created = parsed.timestamp()
         return (record.get("Id") == row["pid"] and norm(record.get("Exe", "")) == norm(exe)
                 and ("Parent" not in record or record["Parent"] == row.get("ppid"))
-                and abs(created - row["create_time"]) < 0.02)
+                and abs(created - row["create_time"]) < tolerance)
     except (ValueError, AttributeError, TypeError, KeyError):
         return False
+
+
+def strict_profile_process(record):
+    return (isinstance(record, dict) and type(record.get("Id")) is int and record["Id"] > 0
+            and type(record.get("Parent")) is int and record["Parent"] > 0
+            and record.get("Name") == "QQ.exe")
+
+
+def fixed_user_data_directory(value):
+    return (isinstance(value, str)
+            and value.replace("/", "\\").casefold() == r"d:\qqbot\data\qq-profile-feiyu")
 
 
 def runtime(root, rows, now):
     core = read_json(root / "run/astrbot.json", 16384)
     pending = read_json(root / STAGE / "pending.json", 32768)
     binding = read_json(root / STAGE / "binding.json", 65536)
+    client_path = root / "config/qq-client.json"
+    client = read_json(client_path, 32768)
     astro_exe, qq_exe = root / "runtime/astrbot-venv/Scripts/python.exe", root / "apps/QQ/QQ.exe"
     rows = rows or []
     astro = next((r for r in rows if core and norm(r.get("exe") or "") == norm(astro_exe)
@@ -121,15 +134,50 @@ def runtime(root, rows, now):
     qqs = [r for r in rows if norm(r.get("exe") or "") == norm(qq_exe) and identity(r)]
     qq_ids = {r["pid"] for r in qqs}
     roots = [r for r in qqs if r.get("ppid") not in qq_ids]
-    qq = roots[0] if len(roots) == 1 else None
     valid_binding = bool(binding and binding.get("Schema") == 1 and binding.get("NoHistoricalReplay") is True
                          and re.fullmatch(r"[a-f0-9]{64}", str(binding.get("ConfigurationFingerprint", "")))
                          and isinstance(binding.get("NativeProcess"), dict))
-    bound = (matches(binding["NativeProcess"], qq, qq_exe) if qq and valid_binding else None)
+    # A configured, fixed bot profile permits selecting the root bound by the
+    # native startup, while the legacy unconfigured case retains its original
+    # single-root rule. An invalid explicit profile fails closed. This check
+    # reads metadata only; it does not verify the live command line or login.
+    tolerance = 0.02
+    profile_configured = client is not None and "userDataDirectory" in client
+    if client is None and (client_path.exists() or client_path.is_symlink()):
+        # An existing but unreadable/invalid config does not establish that a
+        # profile is absent, so it cannot select a QQ process.
+        qq = None
+    elif profile_configured:
+        # .NET creation stamps have 100 ns ticks; psutil exposes a floating
+        # timestamp and Python parses at microsecond precision. Keep only the
+        # small conversion allowance for this profile-bound path.
+        tolerance = 0.000002
+        profile = client.get("userDataDirectory")
+        profile_valid = (fixed_user_data_directory(profile)
+                         and type(client.get("arguments")) is str and client["arguments"] == "")
+        strict_binding = (valid_binding and type(binding.get("Schema")) is int
+                          and type(binding.get("ConfigurationFingerprint")) is str
+                          and fixed_user_data_directory(binding.get("UserDataDirectory"))
+                          and strict_profile_process(binding["NativeProcess"]))
+        bound_roots = ([r for r in roots if matches(binding["NativeProcess"], r, qq_exe, tolerance)]
+                       if profile_valid and strict_binding else [])
+        qq = bound_roots[0] if len(bound_roots) == 1 else None
+    else:
+        qq = roots[0] if len(roots) == 1 else None
+    bound = (matches(binding["NativeProcess"], qq, qq_exe, tolerance) if qq and valid_binding else None)
     valid_pending = bool(pending and pending.get("Schema") == 1 and isinstance(pending.get("NativeProcess"), dict)
                          and valid_binding and pending.get("ConfigurationFingerprint") == binding["ConfigurationFingerprint"])
+    if profile_configured and valid_pending:
+        valid_pending = (type(pending.get("Schema")) is int
+                         and fixed_user_data_directory(pending.get("UserDataDirectory"))
+                         and strict_profile_process(pending["NativeProcess"])
+                         and isinstance(binding.get("ReceiptDirectory"), str)
+                         and binding["ReceiptDirectory"] == pending.get("ReceiptDirectory")
+                         and isinstance(binding.get("StartId"), str)
+                         and re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]{8}", binding["StartId"])
+                         and binding["StartId"] == pending.get("StartId"))
     active = flag(pending, "Active") if valid_pending else None
-    pending_matches = bool(qq and valid_pending and matches(pending["NativeProcess"], qq, qq_exe))
+    pending_matches = bool(qq and valid_pending and matches(pending["NativeProcess"], qq, qq_exe, tolerance))
     settled = bool(astro and qq and bound and pending_matches and active is False
                    and pending.get("Phase") == "native_and_snow_ready" and now - astro["create_time"] >= 60)
     return {"astrbot": identity(astro), "qq": identity(qq), "qq_binding_matches": bound,

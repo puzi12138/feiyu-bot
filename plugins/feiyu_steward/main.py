@@ -30,6 +30,10 @@ from astrbot.core.star.filter.command import GreedyStr
 from PIL import Image as PILImage
 from quart import jsonify, request
 
+from .state_store import load_state, save_state
+from .state_recovery import (MARKER, install_recovered_state_guards, recovery_held,
+                             held_monitor, recovery_status, recovery_boundary)
+
 from .admin_info import AdminInfoBoundary, install_admin_info_tool_guard
 from .availability import refresh_availability, update_availability
 from .autonomy_budget import install_autonomy_budget
@@ -82,6 +86,7 @@ from .heybox_manual_comment import clearly_requested_manual_comment
 from .token_pricing import _peak
 from .heybox_qzone_sync import HeyboxQzoneSync
 from .heybox_write import install_comment_compat
+from .model_proxy_pool import maintain_model_proxy_pool
 from .hltv import HltvMonitor
 from .humanism import BiliHumanism
 from .interest_prompt import interest_prompt, public_draft_prompt
@@ -309,7 +314,7 @@ class FeiyuSteward(
             "bili_owner_daily_limit": 10,
         }
         if self.path.exists():
-            self.state.update(json.loads(self.path.read_text(encoding="utf-8")))
+            self.state.update(load_state(self.path))
         self.incidents = IncidentPolicy(
             self.root / "incidents.json", self.send_incident_notice,
             notice_ready=self.incident_notice_ready)
@@ -345,6 +350,10 @@ class FeiyuSteward(
         self.init_heybox_posts()
         self.init_heybox_autopost()
         self.init_heybox_qzone_sync()
+        self._state_recovery_guards = install_recovered_state_guards(self)
+        if (recovery_held(self.state, "initialization")
+                and self._state_recovery_guards.status()["missing"]):
+            raise RuntimeError("state_recovery_guards_incomplete")
         for endpoint, handler, methods in [
             ("status", self.web_status, ["GET"]),
             ("incidents", self.web_incidents, ["GET", "POST"]),
@@ -389,11 +398,7 @@ class FeiyuSteward(
 
     def save(self):
         """Atomically persist bounded metadata without private transcripts."""
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp.replace(self.path)
+        save_state(self.path, self.state)
 
     def plugin(self, folder):
         """Resolve an already installed active plugin by its directory name.
@@ -416,6 +421,9 @@ class FeiyuSteward(
             coroutine: A bounded asynchronous operation.
             automatic: Whether to clear the inherited owner request scope.
         """
+        if automatic and held_monitor(self.state, coroutine.cr_code.co_name):
+            coroutine.close()
+            return
         if automatic:
             with automatic_scope():
                 task = asyncio.create_task(coroutine)
@@ -478,6 +486,7 @@ class FeiyuSteward(
             incident_hooks = getattr(self, "_incident_hooks", None)
             if incident_hooks:
                 incident_hooks.refresh()
+            self._model_proxy_pool_status = await maintain_model_proxy_pool(self)
             await asyncio.sleep(5)
 
     def ensure_heybox_reply_gate(self):
@@ -622,6 +631,12 @@ class FeiyuSteward(
                 key = str(oid)
                 if key in ledger:
                     return ledger[key].get("status") == "sent"
+                recovery_generation = recovery_boundary(self.state, "bili_owner_comments")
+                state_identity = id(self.state)
+                if (recovery_held(self.state, "bili_owner_comments")
+                        or recovery_generation is not None
+                        and time.time() < recovery_generation["not_before"]):
+                    return False
                 if owner_mention_block(self.state, now):
                     return False
                 automatic_share = (
@@ -635,6 +650,13 @@ class FeiyuSteward(
                 ledger[key] = {"status": "pending", "created": now.isoformat()}
                 self.save()
                 def preflight():
+                    if (id(self.state) != state_identity
+                            or getattr(self, "_group_provider_terminated", True) is not False
+                            or recovery_held(self.state, "bili_owner_comments")
+                            or recovery_boundary(self.state, "bili_owner_comments") != recovery_generation
+                            or recovery_generation is not None
+                            and time.time() < recovery_generation["not_before"]):
+                        return False
                     if not automatic_share:
                         return True
                     return (
@@ -761,7 +783,8 @@ class FeiyuSteward(
                     logger.warning("Heybox deferred discovery unavailable (%s)", type(error).__name__)
                 plugin = self.plugin("astrbot_plugin_xiaoheihe_adapter")
                 if (
-                    plugin
+                    MARKER not in self.state
+                    and plugin
                     and heybox_owner_off_peak()
                     and not activity_block(self.state, datetime.now(TZ))
                     and plugin.runtime.config.snapshot()["proactive_feed"].get(
@@ -900,6 +923,9 @@ class FeiyuSteward(
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        recovery_guards = getattr(self, "_state_recovery_guards", None)
+        if recovery_guards:
+            recovery_guards.restore()
 
     async def web_bili_discovery(self):
         """Start one native browse opportunity; native quota and dedup still apply."""
@@ -1551,8 +1577,11 @@ class FeiyuSteward(
         )
         return jsonify(
             {"ok": True, "data": {**self.state, "bili_reply_hooks_ready": ready,
+                "state_recovery": {**recovery_status(self.state),
+                    "guards": self._state_recovery_guards.status()},
                 "incident_policy": self.incident_status(),
                 "incident_hooks": self._incident_hooks.status() if self._incident_hooks else {"installed": False},
+                "model_proxy_pool_guard": getattr(self, "_model_proxy_pool_status", {"ready": False}),
                 "qq_chat_pause": qq_chat_pause_status(),
                 "qq_friend_exception": friend_policy_status(),
                 "friend_time_notice": friend_time_notice_status(self),
@@ -2008,7 +2037,7 @@ class FeiyuSteward(
                 if cmd == "小黑盒状态":
                     status = await plugin.runtime.auth.status("default")
                     yield event.plain_result(
-                        f"小黑盒：{status.get('state', 'unknown')}；已保存凭据：{bool(status.get('has_credentials'))}。小黑盒主动浏览和主动评论在满足条件时可于高峰运行；主动评论不计入每日十次。回复和@通知仅闲时处理并共用香港日10次，同帖最多一次，高峰通知不补答。给主人自动分享仅闲时；高峰普通文字主动私聊及主人明确要求的工具保留。其他自动业务按原高峰规则暂停。保留网络退避和既有勿扰，发现机会不要求分享或评论。调用 feiyu_comment_heybox 可查实际状态。"
+                        f"小黑盒：{status.get('state', 'unknown')}；已保存凭据：{bool(status.get('has_credentials'))}。小黑盒主动浏览和主动评论在满足条件时可于高峰运行；主动评论不计入每日十次。回复和@通知仅闲时处理并共用香港日10次，非本人帖同帖最多一次；已核验的本人帖子可按不同新评论各处理一次，只在有趣、有新信息或值得回答时回复，同评论不重复，未知发送仍阻断，高峰通知不补答。给主人自动分享仅闲时；高峰普通文字主动私聊及主人明确要求的工具保留。其他自动业务按原高峰规则暂停。保留网络退避和既有勿扰，发现机会不要求分享或评论。调用 feiyu_comment_heybox 可查实际状态。"
                     )
                 else:
                     result = await plugin.runtime.auth.request_qr("default")
@@ -2215,9 +2244,27 @@ class FeiyuSteward(
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)
     async def observe(self, event: AstrMessageEvent):
+        async def finish_xiaoheihe_denial(reason):
+            if event.get_platform_name() == "xiaoheihe":
+                plugin = self.plugin("astrbot_plugin_xiaoheihe_adapter")
+                event_module = sys.modules.get(
+                    "data.plugins.astrbot_plugin_xiaoheihe_adapter.xiaoheihe.event"
+                )
+                if (plugin is not None and event_module is not None
+                        and type(event) is getattr(event_module, "XiaoheiheMessageEvent", None)
+                        and event.runtime is plugin.runtime
+                        and not event._final_send_done and not event._completion.is_set()):
+                    try:
+                        plugin._automatic_binding(event)
+                    except Exception:
+                        return
+                    # A denied native event must not wait for the reply deadline.
+                    await plugin._deny_automatic_event(event, reason)
+
         if ((business_paused(event) and not heybox_peak.event_active(event))
                 or blocked_qq_event(event)):
             event.stop_event()
+            await finish_xiaoheihe_denial("steward_policy_denied")
             return
         self.observe_token_usage_event(event)
         self.prepare_group_cooldown(event)
@@ -2225,6 +2272,7 @@ class FeiyuSteward(
         if listen_handler and await listen_handler(event):
             return
         if self.prepare_admin_info(event):
+            await finish_xiaoheihe_denial("steward_admin_info_denied")
             return
         if self.prepare_resource_request(event):
             return
