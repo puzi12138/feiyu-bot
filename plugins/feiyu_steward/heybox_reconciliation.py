@@ -93,7 +93,7 @@ def matching_comment_id(comments, route, self_uid, content, attempted_at, *, now
         else:
             floor_matches = root == cid and not parent and not expected_parent
         if (cid and post == str(route.post_id) and author == self_uid and floor_matches
-                and isinstance(candidate, str) and candidate.strip() == content.strip()
+                and isinstance(candidate, str) and candidate == content
                 and stamp is not None and attempted - 15 <= stamp <= min(attempted + 180, current + 120)):
             matches.add(cid)
     return next(iter(matches)) if len(matches) == 1 else None
@@ -106,6 +106,9 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
     if not callable(original_check):
         return lambda: None
     package = plugin.__class__.__module__.rsplit(".", 1)[0] + ".xiaoheihe"
+    receipts = importlib.import_module(package + ".unknown_receipts")
+    stored_attempt = receipts.stored_attempt
+    matching_comment_id = receipts.matching_comment_id
     api = importlib.import_module(package + ".api_client")
     endpoints = importlib.import_module(package + ".endpoints")
     models = importlib.import_module(package + ".models")
@@ -114,6 +117,15 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
     contract = endpoints.Endpoint("GET", "/bbs/web/profile/post/comments", True, True)
     previous_contract = endpoints.ENDPOINTS.get(PROFILE_READ)
     endpoints.ENDPOINTS[PROFILE_READ] = contract
+    health = {"last_cycle_at": None, "last_cycle_error": None,
+              "last_read_success_at": None, "last_read_failure_at": None,
+              "last_read_failure_kind": None, "consecutive_read_failures": 0,
+              "counts_sampled_at": None, "unknown_count": None, "outside_window_count": None,
+              "invalid_timestamp_count": None, "sending_count": None}
+
+    def read_failed(kind):
+        health.update(last_read_failure_at=time.time(), last_read_failure_kind=kind,
+                      consecutive_read_failures=health["consecutive_read_failures"] + 1)
 
     async def recent(client, route, *, limit=30):
         self_uid = str(client.credentials.uid) if client.credentials else ""
@@ -128,6 +140,14 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
     api.XiaoheiheApiClient.recent_comments = recent
 
     async def check(client, route, content, outgoing_id, *, attempted_at):
+        # The stored text and its digest describe the actual prior attempt.
+        # Never use current settings to alter historical text during readback.
+        row = await stored_attempt(runtime.repository, route, content, outgoing_id)
+        if row is None:
+            read_failed("record_invalid")
+            return None
+        stored = row["content"]
+        stored_at = row["attempted_at"]
         try:
             comments = await client.recent_comments(route, limit=50)
         except asyncio.CancelledError:
@@ -135,12 +155,21 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
         except Exception:
             # Missing/failed evidence remains unknown; it never means permission
             # is missing, and never authorizes another send.
+            read_failed("platform_read_failed")
             return None
+        health.update(last_read_success_at=time.time(), last_read_failure_kind=None,
+                      consecutive_read_failures=0)
         self_uid = str(client.credentials.uid) if client.credentials else ""
-        normalized = security.sanitize_reply_text(content, int(runtime.config.snapshot()["reply"]["max_reply_chars"]))
-        cid = matching_comment_id(comments, route, self_uid, normalized, attempted_at)
+        cid = matching_comment_id(comments, route, self_uid, stored, stored_at)
         if cid:
-            confirmation = await runtime.repository.confirm_outgoing(outgoing_id, cid)
+            current = await stored_attempt(runtime.repository, route, content, outgoing_id)
+            if current != row:
+                read_failed("record_changed")
+                return None
+            confirmation = await runtime.repository.confirm_outgoing(outgoing_id, cid, expected_attempt=row)
+            if confirmation is None:
+                read_failed("record_changed")
+                return None
             runtime._log_visual_context_binding(outgoing_id, cid, confirmation)
         return cid
 
@@ -160,6 +189,18 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
 
     async def reconcile_once(*, now=None):
         current = time.time() if now is None else now
+        totals = await runtime.repository.db.fetchone(
+            "SELECT SUM(CASE WHEN status IN ('send_unknown','unknown') THEN 1 ELSE 0 END) AS unknown_count, "
+            "SUM(CASE WHEN status IN ('send_unknown','unknown') AND typeof(attempted_at) IN ('integer','real') "
+            "AND attempted_at>0 AND attempted_at<? THEN 1 ELSE 0 END) AS outside_window_count, "
+            "SUM(CASE WHEN status IN ('send_unknown','unknown') AND (attempted_at IS NULL OR "
+            "typeof(attempted_at) NOT IN ('integer','real') OR attempted_at<=0) THEN 1 ELSE 0 END) AS invalid_timestamp_count, "
+            "SUM(CASE WHEN status='sending' THEN 1 ELSE 0 END) AS sending_count FROM outgoing_replies",
+            (current - MAX_AGE,),
+        )
+        health.update({key: int(totals[key] or 0) for key in
+                       ("unknown_count", "outside_window_count", "invalid_timestamp_count", "sending_count")})
+        health["counts_sampled_at"] = current
         # Finish an interrupted local confirmation without a network write. The
         # authoritative native outgoing receipt may have committed immediately
         # before a reload prevented its incoming event from being marked sent.
@@ -219,13 +260,22 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
         while not stopped and not getattr(runtime, "_closed", False):
             try:
                 await asyncio.wait_for(reconcile_once(), timeout=90)
+                health.update(last_cycle_at=time.time(), last_cycle_error=None)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                pass  # No raw upstream status or comments are sent as owner prose.
+                health.update(last_cycle_at=time.time(), last_cycle_error="reconciliation_failed")
             await asyncio.sleep(60)
 
     task = asyncio.create_task(monitor(), name="feiyu-heybox-unknown-readback") if start_monitor else None
+
+    def status():
+        return {**health, "monitor_running": bool(task and not task.done()),
+                "readback_installed": runtime._check_uncertain_send is check,
+                "window_days": 7}
+
+    original_status = getattr(runtime, "feiyu_unknown_reconciliation_status", None)
+    runtime.feiyu_unknown_reconciliation_status = status
 
     def restore():
         nonlocal stopped
@@ -239,6 +289,11 @@ def install_uncertain_reconciliation(plugin, *, start_monitor=True):
                 del runtime.feiyu_reconcile_unknown_comments
             else:
                 runtime.feiyu_reconcile_unknown_comments = original_reconcile
+        if getattr(runtime, "feiyu_unknown_reconciliation_status", None) is status:
+            if original_status is None:
+                del runtime.feiyu_unknown_reconciliation_status
+            else:
+                runtime.feiyu_unknown_reconciliation_status = original_status
         if api.XiaoheiheApiClient.recent_comments is recent:
             api.XiaoheiheApiClient.recent_comments = original_recent
         if endpoints.ENDPOINTS.get(PROFILE_READ) is contract:

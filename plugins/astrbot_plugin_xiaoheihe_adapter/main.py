@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import sys
 import time
 import types
@@ -365,8 +366,17 @@ class _CheckedProvider:
         self._disable_tools = disable_tools
         self._failed = failed
         self._empty_output_failures = 0
+        self._vision_request = ContextVar("feiyu_xiaoheihe_vision_request", default=None)
+        self._vision_verified = ContextVar("feiyu_xiaoheihe_vision_verified", default=None)
         self._state = _install_query_guard(provider)
         self._generation = self._state["generation"]
+
+    @property
+    def _last_vision_query_verified(self):
+        try:
+            return self._vision_verified.get() is asyncio.current_task() and asyncio.current_task() is not None
+        except RuntimeError:
+            return False
 
     def __getattr__(self, name):
         return getattr(self._provider, name)
@@ -424,6 +434,7 @@ class _CheckedProvider:
                     and self._state["generation"] == self._generation
                     and _query_guard_chain_intact(self._provider, self._state)
                     and (self._valid is None or self._valid()))
+        approved = False
         try:
             if not intact():
                 raise ValueError("provider_guard_changed")
@@ -435,10 +446,43 @@ class _CheckedProvider:
                 if self._disable_tools and (tools
                                             or payload.get("tools") or payload.get("tool_choice")):
                     raise ValueError("unexpected_tools")
-            if await self._check() and intact():
-                return
+            approved = await self._check() and intact()
         except BaseException:
             pass
+        if approved:
+            vision = self._vision_request.get()
+            if vision is not None and (query_args or query_kwargs):
+                payload = query_args[0] if query_args else query_kwargs.get("payloads")
+                config = getattr(self._provider, "provider_config", None)
+                extra = config.get("custom_extra_body") if isinstance(config, dict) else None
+                if (not isinstance(config, dict)
+                        or isinstance(extra, dict) and any(key in extra for key in ("messages", "model"))
+                        or "messages" not in getattr(self._provider, "default_params", ())):
+                    raise ValueError("vision_payload_override_not_allowed")
+                messages = payload.get("messages") if isinstance(payload, dict) else None
+                last = messages[-1] if isinstance(messages, list) and messages else None
+                parts = (
+                    last.get("content")
+                    if isinstance(last, dict) and last.get("role") == "user"
+                    else None
+                )
+                images = (
+                    [part for part in parts if isinstance(part, dict) and part.get("type") == "image_url"]
+                    if isinstance(parts, list) else []
+                )
+                if len(images) != vision["expected_count"]:
+                    raise ValueError("vision_payload_missing_images")
+                for part in images:
+                    image = part.get("image_url")
+                    url = image.get("url") if isinstance(image, dict) else None
+                    header, separator, body = (
+                        url.partition(",") if isinstance(url, str) else ("", "", "")
+                    )
+                    if (not separator or not header.startswith("data:image/")
+                            or not header.endswith(";base64") or not body.strip()):
+                        raise ValueError("vision_payload_invalid_image")
+                vision["checked"] = True
+            return
         try:
             await self._closed()
         except BaseException:
@@ -447,6 +491,14 @@ class _CheckedProvider:
         raise asyncio.CancelledError()
 
     async def text_chat(self, *args, **kwargs):
+        self._vision_verified.set(None)
+        image_urls = kwargs.get("image_urls", args[2] if len(args) > 2 else None)
+        vision = None
+        if image_urls:
+            if (not isinstance(image_urls, (list, tuple))
+                    or any(not isinstance(value, str) or not value for value in image_urls)):
+                raise ValueError("invalid_vision_input")
+            vision = {"expected_count": len(image_urls), "checked": False}
         await self._require()
         if not self._state["active"]:
             await self._require()
@@ -458,23 +510,32 @@ class _CheckedProvider:
             kwargs["model"] = self._expected_model
         context = self._state["context"]
         token = context.set(self._require)
+        vision_token = self._vision_request.set(vision)
         try:
             response = await self._provider.text_chat(*args, **kwargs)
+            if vision is not None and not vision["checked"]:
+                raise ValueError("vision_query_unverified")
             if self._disable_tools and getattr(response, "tools_call_name", None):
                 await self._closed()
                 raise asyncio.CancelledError()
             await self._check_response(response)
+            if vision is not None and getattr(response, "role", None) == "err":
+                raise ValueError("vision_provider_response_error")
+            self._vision_verified.set(asyncio.current_task() if vision is not None else None)
             return response
         except Exception as exc:
             await self._report_exception(exc)
             raise
         finally:
+            self._vision_request.reset(vision_token)
             context.reset(token)
             self._state["inflight"] -= 1
             if not self._state["active"] and not self._state["inflight"]:
                 _restore_query_guard(self._state)
 
     async def text_chat_stream(self, *args, **kwargs):
+        if kwargs.get("image_urls") or (len(args) > 2 and args[2]):
+            raise ValueError("streaming_vision_not_supported")
         await self._require()
         if not self._state["active"]:
             await self._require()
@@ -2251,6 +2312,20 @@ class XiaoheiheAdapterPlugin(Star):
                 provider_settings,
                 profile_id=profile_id,
             )
+        if not resolved_candidates:
+            return await self._try_caption_thread_image_group(
+                None,
+                event=event,
+                provider_label="",
+                attribution=attribution,
+                urls=urls,
+                max_chars=max_chars,
+                priority=priority,
+                profile_id=profile_id,
+                deadline=deadline,
+                attempt_timeout_seconds=0,
+                cache_only=True,
+            )
         for provider, provider_id in resolved_candidates:
             result = await self._try_caption_thread_image_group(
                 provider,
@@ -2284,6 +2359,7 @@ class XiaoheiheAdapterPlugin(Star):
         profile_id: str,
         deadline: float,
         attempt_timeout_seconds: float,
+        cache_only: bool = False,
     ) -> ImageCaptionResult | None:
         source = attribution.source
         provider_label = self._provider_runtime_label(provider, provider_label)
@@ -2453,6 +2529,8 @@ class XiaoheiheAdapterPlugin(Star):
                 result=result,
                 attribution=attribution,
             )
+        if cache_only:
+            return None
         if not self._provider_may_accept_images(provider):
             self.runtime.logging.emit(
                 "DEBUG",
@@ -2655,7 +2733,8 @@ class XiaoheiheAdapterPlugin(Star):
         identities = [cls._normalized_image_identity(url) for url in urls if str(url).strip()]
         if not identities:
             return ""
-        return hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
+        return f"verified-v1:{digest}"
 
     @classmethod
     def _image_url_diagnostics(cls, urls: list[str]) -> dict[str, object]:
@@ -2663,13 +2742,17 @@ class XiaoheiheAdapterPlugin(Star):
         fingerprint = cls._image_fingerprint(urls)
         return {
             "image_hosts": [host[:160] for host in hosts[:20]],
-            "image_fingerprint_prefix": fingerprint[:16],
+            "image_fingerprint_prefix": fingerprint.partition(":")[2][:16],
         }
 
     @staticmethod
     def _validated_visual_record_caption(record: dict | None) -> tuple[str, str]:
         if not record:
             return "", "missing"
+        fingerprint = record.get("image_fingerprint")
+        if (not isinstance(fingerprint, str)
+                or not re.fullmatch(r"verified-v1:[0-9a-f]{64}", fingerprint)):
+            return "", "unverified_legacy_vision"
         raw_caption = str(record.get("caption", "") or "")[:4000]
         expected_hash = str(record.get("caption_hash", "") or "")
         actual_hash = hashlib.sha256(raw_caption.encode("utf-8")).hexdigest()
@@ -3063,7 +3146,11 @@ class XiaoheiheAdapterPlugin(Star):
                 )
                 if record is not None:
                     if str(record.get("post_id", "")) == post_id:
-                        hit = "comment_binding"
+                        _, rejection = self._validated_visual_record_caption(record)
+                        if rejection == "unverified_legacy_vision":
+                            record = None
+                        else:
+                            hit = "comment_binding"
                     else:
                         self.runtime.logging.emit(
                             "ERROR",

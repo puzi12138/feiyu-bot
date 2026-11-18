@@ -729,27 +729,49 @@ class Repository:
         self,
         outgoing_id: int,
         external_comment_id: str,
-    ) -> dict[str, Any]:
-        row = await self.db.fetchone(
-            """
-            SELECT outgoing_replies.profile_id,
-                   outgoing_replies.incoming_event_id,
-                   outgoing_replies.post_id,
-                   outgoing_replies.root_comment_id,
-                   outgoing_replies.content_hash,
-                   visual_context_event_links.visual_context_id
-            FROM outgoing_replies
-            LEFT JOIN visual_context_event_links
-              ON visual_context_event_links.incoming_event_id =
-                 outgoing_replies.incoming_event_id
-            WHERE outgoing_replies.id = ?
-            """,
-            (outgoing_id,),
-        )
-        if row is None:
-            raise ValueError("待确认发送记录不存在")
+        *,
+        expected_attempt: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         now = time.time()
         async with self.db.transaction() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT outgoing_replies.profile_id,
+                       outgoing_replies.incoming_event_id,
+                       outgoing_replies.post_id,
+                       outgoing_replies.root_comment_id,
+                       outgoing_replies.parent_comment_id,
+                       outgoing_replies.content,
+                       outgoing_replies.content_hash,
+                       outgoing_replies.status,
+                       outgoing_replies.attempted_at,
+                       outgoing_replies.external_comment_id,
+                       outgoing_replies.confirmed_at,
+                       visual_context_event_links.visual_context_id
+                FROM outgoing_replies
+                LEFT JOIN visual_context_event_links
+                  ON visual_context_event_links.incoming_event_id =
+                     outgoing_replies.incoming_event_id
+                WHERE outgoing_replies.id = ?
+                """,
+                (outgoing_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                if expected_attempt is not None:
+                    return None
+                raise ValueError("待确认发送记录不存在")
+            if expected_attempt is not None:
+                fields = ("incoming_event_id", "profile_id", "post_id", "root_comment_id",
+                          "parent_comment_id", "content", "content_hash", "status", "attempted_at",
+                          "external_comment_id", "confirmed_at")
+                if (set(expected_attempt) != set(fields)
+                        or expected_attempt["status"] not in {"sending", "send_unknown"}
+                        or expected_attempt["external_comment_id"] != ""
+                        or expected_attempt["confirmed_at"] is not None
+                        or any(row[field] != expected_attempt[field] for field in fields)):
+                    return None
             await connection.execute(
                 """
                 UPDATE outgoing_replies

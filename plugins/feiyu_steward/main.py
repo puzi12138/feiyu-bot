@@ -1629,6 +1629,8 @@ class FeiyuSteward(
                 "heybox_journal_observer_ready": bool(getattr(self, "_heybox_journal_observer_restore", None)),
                 "heybox_social_reply_guard_ready": bool(getattr(self, "_heybox_social_reply_restore", None)),
                 "heybox_unknown_reconciliation_ready": callable(getattr(getattr(heybox, "runtime", None), "feiyu_reconcile_unknown_comments", None)),
+                "heybox_unknown_reconciliation": getattr(getattr(heybox, "runtime", None),
+                    "feiyu_unknown_reconciliation_status", lambda: {"readback_installed": False})(),
                 "native_private_text": self._native_private_handle.status() if self._native_private_handle else {"installed": False},
                 "private_journal_sources": ["bilibili", "heybox"],
                 "qq_profile_autonomy": self.status_qq_profile(),

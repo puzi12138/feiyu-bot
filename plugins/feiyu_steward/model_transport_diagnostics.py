@@ -44,6 +44,7 @@ class ModelTransportDiagnostics:
         self._salt = uuid.uuid4().bytes
         self._clients = weakref.WeakKeyDictionary()
         self._visions = weakref.WeakKeyDictionary()
+        self._verified_visions = weakref.WeakKeyDictionary()
 
     def _identity(self, value):
         return hashlib.sha256(self._salt + str(id(value)).encode("ascii")).hexdigest()
@@ -233,7 +234,12 @@ class ModelTransportDiagnostics:
         value = self._visions.get(event)
         return dict(value) if self.active and value is not None else None
 
-    def finish(self, span, outcome):
+    def last_verified_vision(self, event):
+        """Return only a completed, image-verified invocation for this event."""
+        value = self._verified_visions.get(event)
+        return dict(value) if self.active and value is not None else None
+
+    def finish(self, span, outcome, *, verified_image=False):
         """Detach this task scope, keeping only a completed visual identity."""
         if span is None:
             return
@@ -245,6 +251,8 @@ class ModelTransportDiagnostics:
             if self.active and data["phase"] == "vision":
                 # Keep full metadata in memory only until the normal group report.
                 self._visions[span["event"]] = json.loads(json.dumps(data, allow_nan=False))
+                if data["outcome"] == "success" and verified_image is True:
+                    self._verified_visions[span["event"]] = json.loads(json.dumps(data, allow_nan=False))
         finally:
             span["active"] = False
             _CURRENT.reset(span["token"])
@@ -263,3 +271,4 @@ class ModelTransportDiagnostics:
                 pass
         self._clients.clear()
         self._visions.clear()
+        self._verified_visions.clear()

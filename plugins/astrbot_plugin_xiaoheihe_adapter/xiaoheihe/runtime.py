@@ -27,6 +27,7 @@ from .repository import Repository
 from .request_signing import ensure_client_identity
 from .security import redact_log_text, redact_text, sanitize_reply_text
 from .task_manager import TaskManager
+from .unknown_receipts import matching_comment_id, stored_attempt
 
 PLUGIN_NAME = "astrbot_plugin_xiaoheihe_adapter"
 
@@ -711,76 +712,30 @@ class RuntimeServices:
         *,
         attempted_at: float,
     ) -> str | None:
-        """Check recent comments, but never infer absence from an unverified API."""
-
+        """Confirm only a unique, fully identified existing attempt."""
+        row = await stored_attempt(self.repository, route, content, outgoing_id)
+        if row is None:
+            return None
         try:
-            comments = await client.recent_comments(route, limit=30)
+            comments = await client.recent_comments(route, limit=50)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            self.logging.emit(
-                "ERROR",
-                f"发送状态未知且核对失败: {exc}",
-                profile_id=route.profile_id,
-            )
+        except Exception:
             return None
-        self_uid = client.credentials.uid if client.credentials else ""
-        normalized = sanitize_reply_text(
-            content, int(self.config.snapshot()["reply"]["max_reply_chars"])
+        self_uid = str(client.credentials.uid) if client.credentials else ""
+        comment_id = matching_comment_id(comments, route, self_uid, row["content"], row["attempted_at"])
+        if comment_id is None:
+            return None
+        current = await stored_attempt(self.repository, route, content, outgoing_id)
+        if current != row:
+            return None
+        confirmation = await self.repository.confirm_outgoing(
+            outgoing_id, comment_id, expected_attempt=row,
         )
-        for comment in comments:
-            user = comment.get("user", comment.get("sender", {}))
-            user = user if isinstance(user, dict) else {}
-            uid = str(
-                user.get(
-                    "uid",
-                    user.get(
-                        "heybox_id",
-                        user.get(
-                            "heyboxid",
-                            user.get("user_id", user.get("userid", user.get("id", ""))),
-                        ),
-                    ),
-                )
-            )
-            candidate = str(comment.get("content", comment.get("text", ""))).strip()
-            comment_id = str(comment.get("comment_id", comment.get("id", "")))
-            timestamp_value = comment.get(
-                "created_at",
-                comment.get("timestamp", comment.get("time")),
-            )
-            try:
-                comment_time = float(timestamp_value)
-                if comment_time > 10_000_000_000:
-                    comment_time /= 1000
-            except (TypeError, ValueError):
-                continue
-            within_window = attempted_at - 600 <= comment_time <= time.time() + 120
-            if (
-                self_uid
-                and uid == self_uid
-                and candidate == normalized
-                and comment_id
-                and within_window
-            ):
-                confirmation = await self.repository.confirm_outgoing(outgoing_id, comment_id)
-                self._log_visual_context_binding(
-                    outgoing_id,
-                    comment_id,
-                    confirmation,
-                )
-                self.logging.emit(
-                    "WARNING",
-                    "发送超时后在目标楼层核对到相同机器人评论，已确认成功",
-                    profile_id=route.profile_id,
-                )
-                return comment_id
-        self.logging.emit(
-            "WARNING",
-            "发送状态未知；近期列表未发现匹配项，但因接口一致性未验证，不自动重试",
-            profile_id=route.profile_id,
-        )
-        return None
+        if confirmation is None:
+            return None
+        self._log_visual_context_binding(outgoing_id, comment_id, confirmation)
+        return comment_id
 
     async def status(self) -> dict[str, Any]:
         await self.ensure_started()

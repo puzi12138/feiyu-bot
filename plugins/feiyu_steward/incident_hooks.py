@@ -1677,6 +1677,13 @@ class IncidentHooks:
                         and bool(settings.get("enable_image_understanding", True)))
             if not eligible:
                 return await original(event, *args, **kwargs)
+            collector = self._model_transport_diagnostics
+            prior_vision = None
+            if collector is not None:
+                try:
+                    prior_vision = collector.last_verified_vision(event)
+                except Exception:
+                    pass
             group = {"task": asyncio.current_task(), "event": event, "failed": False,
                      "hard_failure": False, "failure_kind": None}
             token = _HEYBOX_VISION_GROUP.set(group)
@@ -1696,6 +1703,15 @@ class IncidentHooks:
                     image_cooldown=None if group["hard_failure"] else group.get("image_cooldown"))
                 # Stop the current event before another image group can run.
                 raise IncidentFeaturePaused("incident_vision_failed")
+            if result is not None and collector is not None:
+                try:
+                    observed = collector.last_verified_vision(event)
+                    if (getattr(result, "cache_hit", None) == "" and observed is not None
+                            and (prior_vision is None or observed["invocation"] != prior_vision["invocation"])):
+                        from .vision_recovery_observation import record_following_vision_success
+                        record_following_vision_success(getattr(self.host, "root", None), observed)
+                except Exception:
+                    pass
             return result
         return wrapped
 
@@ -1771,6 +1787,7 @@ class IncidentHooks:
         @functools.wraps(original, updated=())
         async def wrapped(checked, *args, **kwargs):
             span = None
+            verified_image = False
             collector = self._model_transport_diagnostics
             try:
                 if collector is not None and self._active and _ACTIVE_INCIDENT_HOOKS is self:
@@ -1794,6 +1811,11 @@ class IncidentHooks:
             try:
                 result = await original(checked, *args, **kwargs)
                 outcome = "success"
+                try:
+                    verified_image = (getattr(checked, "_last_vision_query_verified", False) is True
+                                      and getattr(result, "role", None) != "err")
+                except Exception:
+                    pass
                 return result
             except asyncio.CancelledError:
                 outcome = "cancelled"
@@ -1804,7 +1826,7 @@ class IncidentHooks:
             finally:
                 if span is not None:
                     try:
-                        collector.finish(span, outcome)
+                        collector.finish(span, outcome, verified_image=verified_image)
                     except Exception:
                         pass
         return wrapped
